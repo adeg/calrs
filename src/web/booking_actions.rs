@@ -363,6 +363,7 @@ pub(super) async fn approve_booking_by_token(
 
     let guest_language = crate::email::stored_booking_language(&state.pool, &bid).await;
 
+    let (guest_notes, guest_phone_shown) = booking_guest_input(&state.pool, &uid).await;
     let details = crate::email::BookingDetails {
         utc_times: crate::booking_time::ics_times(&start_at, &end_at),
         event_title: event_title.clone(),
@@ -375,10 +376,11 @@ pub(super) async fn approve_booking_by_token(
         host_name: host_name.clone(),
         host_email,
         uid: uid.clone(),
-        notes: None,
+        notes: guest_notes,
+        guest_phone: guest_phone_shown,
         location: location_display,
         reminder_minutes: None,
-        additional_attendees: vec![],
+        additional_attendees: booking_additional_attendees(&state.pool, &uid).await,
         // The guest booked in their own language; the host approving here may
         // well be browsing in another one, so this comes from the booking row
         // rather than from the approver's Accept-Language.
@@ -386,7 +388,6 @@ pub(super) async fn approve_booking_by_token(
         host_language,
         host_timezone: stored_tz.name().to_string(),
         resource_name: booking_resource_label(&state.pool, &uid).await,
-        ..Default::default()
     };
 
     // Push to CalDAV calendar
@@ -2153,6 +2154,7 @@ pub(super) async fn guest_reschedule_booking(
     } else {
         // Confirmed reschedule (host-initiated or guest on non-confirmation event)
         // Push updated event to CalDAV
+        let (guest_notes, guest_phone_shown) = booking_guest_input(&state.pool, &uid).await;
         let push_details = crate::email::BookingDetails {
             utc_times: crate::booking_time::ics_times(&new_start_at, &new_end_at),
             event_title: et_title.clone(),
@@ -2165,10 +2167,11 @@ pub(super) async fn guest_reschedule_booking(
             host_name: host_name.clone(),
             host_email: host_email.clone(),
             uid: uid.clone(),
-            notes: None,
+            notes: guest_notes,
+            guest_phone: guest_phone_shown,
             location: loc_value.clone(),
             reminder_minutes: None,
-            additional_attendees: vec![],
+            additional_attendees: booking_additional_attendees(&state.pool, &uid).await,
             guest_language: booking_language.clone(),
             host_language: host_language.clone(),
             host_timezone: host_tz.name().to_string(),
@@ -2865,6 +2868,7 @@ pub(super) async fn claim_booking(
     let claim_host_tz = get_host_tz(&state.pool, &event_type_id).await;
 
     // Build details with claimant as additional attendee for CalDAV push
+    let (guest_notes, guest_phone_shown) = booking_guest_input(&state.pool, &uid).await;
     let mut details = crate::email::BookingDetails {
         utc_times: claim_utc_times.clone(),
         event_title: event_title.clone(),
@@ -2877,7 +2881,8 @@ pub(super) async fn claim_booking(
         host_name,
         host_email,
         uid: uid.clone(),
-        notes: None,
+        notes: guest_notes,
+        guest_phone: guest_phone_shown,
         location,
         reminder_minutes: None,
         additional_attendees: vec![claimant_email.clone()],
@@ -2909,13 +2914,18 @@ pub(super) async fn claim_booking(
 
     // Push to claimant's CalDAV calendar too. Deliberately bypasses the
     // assigned-user resolution: this copy belongs to the claimant even
-    // though the booking stays assigned elsewhere.
+    // though the booking stays assigned elsewhere. The claimant is a
+    // watcher, not a host: they see the notes on their dashboard but never
+    // the guest phone, so their copy leaves it out.
     caldav_push_booking_for_user(
         &state.pool,
         &state.secret_key,
         &claimant_user_id,
         &uid,
-        &details,
+        &crate::email::BookingDetails {
+            guest_phone: None,
+            ..details.clone()
+        },
     )
     .await;
 

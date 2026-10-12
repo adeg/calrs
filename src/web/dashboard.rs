@@ -1503,6 +1503,7 @@ pub(super) async fn confirm_booking(
             )
         });
 
+    let (guest_notes, guest_phone_shown) = booking_guest_input(&state.pool, &uid).await;
     let details = crate::email::BookingDetails {
         utc_times: crate::booking_time::ics_times(&start_at, &end_at),
         event_title,
@@ -1515,17 +1516,17 @@ pub(super) async fn confirm_booking(
         host_name,
         host_email,
         uid: uid.clone(),
-        notes: None,
+        notes: guest_notes,
+        guest_phone: guest_phone_shown,
         location: location_display,
         reminder_minutes: None,
-        additional_attendees: vec![],
+        additional_attendees: booking_additional_attendees(&state.pool, &uid).await,
         // The host clicked approve, so the request carries the host's
         // language; the guest's is the one stored with the booking (#209).
         guest_language,
         host_language,
         host_timezone: stored_tz.name().to_string(),
         resource_name: booking_resource_label(&state.pool, &uid).await,
-        ..Default::default()
     };
 
     // Push to CalDAV calendar
