@@ -1520,7 +1520,7 @@ pub(super) async fn confirm_booking(
         guest_phone: guest_phone_shown,
         location: location_display,
         reminder_minutes: None,
-        additional_attendees: vec![],
+        additional_attendees: booking_additional_attendees(&state.pool, &uid).await,
         // The host clicked approve, so the request carries the host's
         // language; the guest's is the one stored with the booking (#209).
         guest_language,

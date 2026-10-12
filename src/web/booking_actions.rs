@@ -380,7 +380,7 @@ pub(super) async fn approve_booking_by_token(
         guest_phone: guest_phone_shown,
         location: location_display,
         reminder_minutes: None,
-        additional_attendees: vec![],
+        additional_attendees: booking_additional_attendees(&state.pool, &uid).await,
         // The guest booked in their own language; the host approving here may
         // well be browsing in another one, so this comes from the booking row
         // rather than from the approver's Accept-Language.
@@ -2171,7 +2171,7 @@ pub(super) async fn guest_reschedule_booking(
             guest_phone: guest_phone_shown,
             location: loc_value.clone(),
             reminder_minutes: None,
-            additional_attendees: vec![],
+            additional_attendees: booking_additional_attendees(&state.pool, &uid).await,
             guest_language: booking_language.clone(),
             host_language: host_language.clone(),
             host_timezone: host_tz.name().to_string(),

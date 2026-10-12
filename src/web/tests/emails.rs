@@ -171,6 +171,35 @@ async fn token_approval_host_email_keeps_the_guest_phone_and_notes() {
     assert!(mail.contains("Bring the quote"), "{mail}");
 }
 
+/// Approval used to rebuild the details with no additional attendees: the
+/// calendar event and the guest's invite listed only the guest, and the
+/// attendees never heard the booking was confirmed (found while fixing #261).
+#[tokio::test]
+async fn approval_keeps_the_additional_attendees() {
+    let _env = crate::test_support::ENV_LOCK.lock().await;
+    let (app, pool, _, et_id) = setup_test_app().await;
+    let (port, mails) = spawn_capturing_mta().await;
+    use_capturing_mta(&pool, port).await;
+    let booking_id = insert_pending_french_booking(&pool, &et_id, "uid-261-attendees").await;
+    sqlx::query(
+        "INSERT INTO booking_attendees (id, booking_id, email) VALUES ('att-261', ?, 'friend@test.com')",
+    )
+    .bind(&booking_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let response = app
+        .oneshot(post_bare("/booking/approve/confirm-uid-261-attendees"))
+        .await
+        .unwrap();
+    assert!(response.status().is_success() || response.status().is_redirection());
+
+    let guest = mail_to(&mails, "guest@test.com").await;
+    assert!(guest.contains("mailto:friend@test.com"), "{guest}");
+    mail_to(&mails, "friend@test.com").await;
+}
+
 /// The host approving from the dashboard browses in their own language;
 /// the guest still gets the confirmation in the language they booked in.
 /// Before #209 this path never read `bookings.language` and fell back to

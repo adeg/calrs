@@ -862,6 +862,24 @@ pub(super) async fn booking_guest_input(
     (notes, phone)
 }
 
+/// The additional attendees the guest invited, for paths that rebuild
+/// `BookingDetails` from the row: without them an approved or rescheduled
+/// booking's calendar event lists only the guest.
+pub(super) async fn booking_additional_attendees(
+    pool: &SqlitePool,
+    booking_uid: &str,
+) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT ba.email FROM booking_attendees ba
+         JOIN bookings b ON b.id = ba.booking_id
+         WHERE b.uid = ? ORDER BY ba.created_at, ba.email",
+    )
+    .bind(booking_uid)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
 /// Release one specific resource's reservation for a booking, fetched by
 /// id (used when a reschedule re-pick moves the booking off a resource the
 /// row no longer references).
