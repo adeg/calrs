@@ -1793,3 +1793,24 @@ fn footer_is_translated() {
     let mail = compose_guest_pending_notice(&details, None, None);
     assert!(mail.html.contains("Inviato da"));
 }
+
+/// #261: once approved, the host's "Booking confirmed" email still carries
+/// what the guest typed, as the approval request did; so do the new-booking
+/// notification and the reminder.
+#[test]
+fn host_booking_emails_carry_the_guest_phone_and_notes() {
+    let details = BookingDetails {
+        guest_phone: Some("+33612345678".to_string()),
+        notes: Some("Bring the quote".to_string()),
+        ..host_in(None)
+    };
+    for mail in [
+        compose_host_booking_confirmed(&details),
+        compose_host_reminder(&details),
+        compose_host_notification(&details),
+    ] {
+        assert!(mail.plain.contains("Phone: +33612345678"), "{}", mail.plain);
+        assert!(mail.plain.contains("Bring the quote"), "{}", mail.plain);
+        assert!(mail.html.contains("+33612345678"));
+    }
+}

@@ -38,6 +38,12 @@ pub(super) fn compose_host_notification(details: &BookingDetails) -> ComposedEma
     push_row(
         &mut rows,
         lang,
+        "email-detail-phone",
+        details.guest_phone.as_ref(),
+    );
+    push_row(
+        &mut rows,
+        lang,
         "confirmed-detail-location",
         details.location.as_ref(),
     );
@@ -118,6 +124,12 @@ pub(super) fn compose_host_booking_confirmed(details: &BookingDetails) -> Compos
     push_row(
         &mut rows,
         lang,
+        "email-detail-phone",
+        details.guest_phone.as_ref(),
+    );
+    push_row(
+        &mut rows,
+        lang,
         "confirmed-detail-location",
         details.location.as_ref(),
     );
@@ -126,6 +138,12 @@ pub(super) fn compose_host_booking_confirmed(details: &BookingDetails) -> Compos
         lang,
         "bookings-resource",
         details.resource_name.as_ref(),
+    );
+    push_row(
+        &mut rows,
+        lang,
+        "confirmed-detail-notes",
+        details.notes.as_ref(),
     );
     let footer = t(lang, "email-host-confirmed-footer");
     EmailParts {
@@ -370,6 +388,12 @@ pub(super) fn compose_host_reminder(details: &BookingDetails) -> ComposedEmail {
     push_row(
         &mut rows,
         lang,
+        "email-detail-phone",
+        details.guest_phone.as_ref(),
+    );
+    push_row(
+        &mut rows,
+        lang,
         "confirmed-detail-location",
         details.location.as_ref(),
     );
@@ -378,6 +402,12 @@ pub(super) fn compose_host_reminder(details: &BookingDetails) -> ComposedEmail {
         lang,
         "bookings-resource",
         details.resource_name.as_ref(),
+    );
+    push_row(
+        &mut rows,
+        lang,
+        "confirmed-detail-notes",
+        details.notes.as_ref(),
     );
     EmailParts {
         lang,

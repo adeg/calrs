@@ -1909,3 +1909,43 @@ fn html_email_has_calrs_footer_link() {
     assert!(html.contains("https://cal.rs"));
     assert!(html.contains("calrs"));
 }
+
+// #261: the host's calendar copy carries the guest phone and notes, so a host
+// who checks their calendar on the go has them. The email attachment keeps
+// the phone out: it also reaches additional attendees.
+#[test]
+fn generate_ics_caldav_carries_phone_and_notes() {
+    let details = BookingDetails {
+        event_title: "Call".to_string(),
+        date: "2026-03-10".to_string(),
+        start_time: "09:00".to_string(),
+        end_time: "10:00".to_string(),
+        guest_name: "Bob".to_string(),
+        guest_email: "bob@test.com".to_string(),
+        guest_timezone: "UTC".to_string(),
+        host_name: "Alice".to_string(),
+        host_email: "alice@test.com".to_string(),
+        uid: "uid-261".to_string(),
+        notes: Some("Bring the quote".to_string()),
+        guest_phone: Some("+33612345678".to_string()),
+        host_language: Some("fr".to_string()),
+        ..Default::default()
+    };
+
+    let caldav = generate_ics_caldav(&details);
+    assert!(
+        caldav.contains("DESCRIPTION:Téléphone : +33612345678\\nBring the quote\r\n"),
+        "{caldav}"
+    );
+
+    let email = generate_ics(&details, "REQUEST");
+    assert!(email.contains("DESCRIPTION:Bring the quote\r\n"), "{email}");
+    assert!(!email.contains("+33612345678"), "{email}");
+
+    let phone_only = generate_ics_caldav(&BookingDetails {
+        notes: None,
+        host_language: None,
+        ..details
+    });
+    assert!(phone_only.contains("DESCRIPTION:Phone: +33612345678\r\n"));
+}

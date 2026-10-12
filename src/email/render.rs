@@ -391,12 +391,31 @@ fn generate_ics_impl(
         .as_ref()
         .map(|l| format!("LOCATION:{}\r\n", sanitize_ics(l)))
         .unwrap_or_default();
-    let description_line = details
+    // The phone goes only into the host's own calendar copy (#261): an email
+    // attachment also reaches additional attendees, who have no use for it.
+    let phone = details
+        .guest_phone
+        .as_ref()
+        .filter(|p| schedule_agent_client && !p.trim().is_empty())
+        .map(|p| {
+            sanitize_ics(&format!(
+                "{} {}",
+                t(host_lang(details), "email-detail-phone"),
+                p
+            ))
+        });
+    let notes = details
         .notes
         .as_ref()
         .filter(|n| !n.trim().is_empty())
-        .map(|n| format!("DESCRIPTION:{}\r\n", sanitize_ics(n)))
-        .unwrap_or_default();
+        .map(|n| sanitize_ics(n));
+    let description: Vec<String> = phone.into_iter().chain(notes).collect();
+    let description_line = if description.is_empty() {
+        String::new()
+    } else {
+        // `\n` is the escaped line break of an RFC 5545 TEXT value.
+        format!("DESCRIPTION:{}\r\n", description.join("\\n"))
+    };
     let valarm = details
         .reminder_minutes
         .filter(|&m| m > 0)

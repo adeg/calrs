@@ -100,6 +100,45 @@ async fn approval_request_email_includes_the_guest_phone() {
     assert!(mail.contains("+33612345678"), "{mail}");
 }
 
+/// #261: approving a pending booking used to rebuild the details with no
+/// notes and no phone, so the host's "Booking confirmed" email dropped both.
+#[tokio::test]
+async fn dashboard_approval_host_email_keeps_the_guest_phone_and_notes() {
+    let _env = crate::test_support::ENV_LOCK.lock().await;
+    let (app, pool, session, et_id) = setup_test_app().await;
+    let (port, mails) = spawn_capturing_mta().await;
+    use_capturing_mta(&pool, port).await;
+    sqlx::query("UPDATE event_types SET sms_phone_mode = 'optional' WHERE id = ?")
+        .bind(&et_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let booking_id = insert_pending_french_booking(&pool, &et_id, "uid-261-approve").await;
+    sqlx::query(
+        "UPDATE bookings SET guest_phone = '+33612345678', notes = 'Bring the quote' WHERE id = ?",
+    )
+    .bind(&booking_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let csrf = "test-csrf-261-approve";
+    let response = app
+        .oneshot(post_form(
+            &format!("/dashboard/bookings/{}/confirm", booking_id),
+            &session,
+            csrf,
+            &format!("_csrf={}", csrf),
+        ))
+        .await
+        .unwrap();
+    assert!(response.status().is_redirection());
+
+    let mail = mail_to(&mails, "test@example.com").await;
+    assert!(mail.contains("+33612345678"), "{mail}");
+    assert!(mail.contains("Bring the quote"), "{mail}");
+}
+
 /// The host approving from the dashboard browses in their own language;
 /// the guest still gets the confirmation in the language they booked in.
 /// Before #209 this path never read `bookings.language` and fell back to

@@ -740,7 +740,13 @@ pub(super) async fn resource_push_booking(
             .await
             .unwrap_or(None)
             .flatten();
-    let ics = crate::email::generate_ics_caldav(details);
+    // A resource calendar is shared, often published as a public feed: the
+    // reservation carries the slot, never what the guest typed.
+    let ics = crate::email::generate_ics_caldav(&crate::email::BookingDetails {
+        notes: None,
+        guest_phone: None,
+        ..details.clone()
+    });
 
     for (resource_id, caldav_url, service_user, service_pw) in &targets {
         let Some(url) = caldav_url else {
@@ -825,6 +831,35 @@ pub(super) async fn booking_resource_label(pool: &SqlitePool, booking_uid: &str)
     } else {
         Some(names.join(", "))
     }
+}
+
+/// What the guest typed into the booking form that the host should keep:
+/// the notes, and the phone number when the event type collects one (a phone
+/// stored before the mode was switched off is not shown). Paths that rebuild
+/// `BookingDetails` from the row (approval, reschedule, claim, reminders) use
+/// this so the host emails and the calendar event carry what the booking
+/// form's own emails did (#261).
+pub(super) async fn booking_guest_input(
+    pool: &SqlitePool,
+    booking_uid: &str,
+) -> (Option<String>, Option<String>) {
+    let row: Option<(Option<String>, Option<String>, String)> = sqlx::query_as(
+        "SELECT b.notes, b.guest_phone, et.sms_phone_mode
+         FROM bookings b JOIN event_types et ON et.id = b.event_type_id
+         WHERE b.uid = ?",
+    )
+    .bind(booking_uid)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+    let Some((notes, phone, phone_mode)) = row else {
+        return (None, None);
+    };
+    let notes = notes.filter(|n| !n.trim().is_empty());
+    let phone = phone
+        .filter(|p| !p.trim().is_empty())
+        .filter(|_| crate::sms::collects_phone(&phone_mode));
+    (notes, phone)
 }
 
 /// Release one specific resource's reservation for a booking, fetched by
