@@ -1267,6 +1267,65 @@ fn decline_notice_without_a_stored_language_is_english() {
     assert!(mail.html.contains("<html lang=\"en\">"));
 }
 
+/// #267: a declined or expired reschedule of a confirmed booking attaches a
+/// CANCEL that removes the guest's original booking, so the text says so;
+/// a new request, which sent no invite, does not.
+#[test]
+fn withdrawn_reschedule_tells_the_guest_the_original_booking_is_cancelled() {
+    let rescheduled = CancellationDetails {
+        invite_sent: true,
+        reschedule_pending: true,
+        ..cancellation_from(&sample_booking_details())
+    };
+    let line = "Your original booking is cancelled as well.";
+    for mail in [
+        compose_guest_decline_notice(&rescheduled),
+        compose_guest_pending_expired(&rescheduled, None),
+    ] {
+        assert!(mail.plain.contains(line), "{}", mail.plain);
+        assert!(mail.html.contains(line));
+        assert!(mail.plain.contains("A calendar cancellation is attached."));
+    }
+
+    let french = CancellationDetails {
+        guest_language: Some("fr".to_string()),
+        ..rescheduled.clone()
+    };
+    let mail = compose_guest_decline_notice(&french);
+    assert!(mail
+        .plain
+        .contains("Votre réservation initiale est également annulée."));
+
+    let request = cancellation_from(&sample_booking_details());
+    for mail in [
+        compose_guest_decline_notice(&request),
+        compose_guest_pending_expired(&request, None),
+    ] {
+        assert!(!mail.plain.contains(line));
+        assert!(!mail.html.contains(line));
+    }
+}
+
+/// #267: the attendees' cancellation of a reschedule awaiting approval
+/// leaves the requested date out, and builds its subject from a Fluent
+/// pattern like every other subject, so each locale can order it.
+#[test]
+fn attendee_cancellation_of_a_pending_reschedule_has_a_translated_subject() {
+    let details = CancellationDetails {
+        invite_sent: true,
+        reschedule_pending: true,
+        ..cancellation_from(&sample_booking_details())
+    };
+    assert_eq!(
+        compose_attendee_cancellation(&details, "en").subject,
+        "Cancelled: 30min Intro"
+    );
+    assert_eq!(
+        compose_attendee_cancellation(&details, "fr").subject,
+        "Annul\u{e9}e : 30min Intro"
+    );
+}
+
 #[test]
 fn html_email_lang_attribute_is_escaped() {
     let html = render_html_email_in("fr\"><script>", "Hi,", "Body", "#000", &[], None, &[]);
@@ -1579,6 +1638,23 @@ fn host_reschedule_request_is_written_in_the_host_language() {
     assert!(mail.plain.contains("Log in to your dashboard"));
 }
 
+/// #266: the request for a new time shows what the guest typed, as the
+/// original approval request does.
+#[test]
+fn host_reschedule_request_shows_the_guest_phone_and_notes() {
+    let details = RescheduleDetails {
+        notes: Some("Bring the quote".to_string()),
+        guest_phone: Some("+33612345678".to_string()),
+        ..sample_reschedule_details()
+    };
+    let mail = compose_host_reschedule_request(&details, None, None);
+    assert!(mail.plain.contains("Phone: +33612345678"), "{}", mail.plain);
+    assert!(mail.plain.contains("Bring the quote"), "{}", mail.plain);
+
+    let mail = compose_host_reschedule_request(&sample_reschedule_details(), None, None);
+    assert!(!mail.plain.contains("Phone:"), "{}", mail.plain);
+}
+
 #[test]
 fn watcher_claim_offer_is_written_in_the_watcher_language() {
     let mail = compose_watcher_claim_notification(
@@ -1719,7 +1795,7 @@ fn attendee_confirmation_is_written_in_the_booking_language() {
         guest_language: Some("es".to_string()),
         ..sample_booking_details()
     };
-    let mail = compose_attendee_confirmation(&details);
+    let mail = compose_attendee_confirmation(&details, "es");
     assert!(mail.plain.starts_with("Hola,"));
     assert!(mail.plain.contains("Organizador: Alice Smith"));
     assert!(mail
@@ -1728,10 +1804,43 @@ fn attendee_confirmation_is_written_in_the_booking_language() {
     assert!(mail.html.contains("<html lang=\"es\">"));
     assert_no_english(&mail, &["added as an attendee", "Organizer", "Booked by"]);
 
-    let mail = compose_attendee_confirmation(&sample_booking_details());
+    let mail = compose_attendee_confirmation(&sample_booking_details(), "en");
     assert!(mail
         .plain
         .contains("You've been added as an attendee to a booking."));
+}
+
+/// #267: the attendees' copy of a reschedule, in the booking language,
+/// showing no more than their confirmation did.
+#[test]
+fn attendee_reschedule_is_written_in_the_booking_language() {
+    let details = BookingDetails {
+        guest_language: Some("es".to_string()),
+        guest_phone: Some("+33612345678".to_string()),
+        resource_name: Some("Demo Lab 1".to_string()),
+        ..sample_booking_details()
+    };
+    let mail =
+        compose_attendee_reschedule(&details, Some(("2026-03-09", "09:00 \u{2013} 09:30")), "es");
+    assert!(mail.plain.starts_with("Hola,"));
+    assert!(mail
+        .plain
+        .contains("Una reserva en la que participas ha cambiado de horario."));
+    assert!(mail.plain.contains("2026-03-09"), "{}", mail.plain);
+    assert!(mail.plain.contains("Organizador: Alice Smith"));
+    assert!(mail.html.contains("<html lang=\"es\">"));
+    assert_no_english(&mail, &["has moved", "Organizer", "Booked by", "Previous"]);
+    for host_only in ["+33612345678", "Demo Lab 1"] {
+        assert!(!mail.plain.contains(host_only), "{}", mail.plain);
+        assert!(!mail.html.contains(host_only), "{}", mail.html);
+    }
+
+    // At approval the old time is gone from the row: no "Previous" line.
+    let mail = compose_attendee_reschedule(&sample_booking_details(), None, "en");
+    assert!(mail
+        .plain
+        .contains("A booking you attend has moved to a new time."));
+    assert!(!mail.plain.contains("Previous"), "{}", mail.plain);
 }
 
 #[test]

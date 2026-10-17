@@ -1008,18 +1008,14 @@ async fn booking_details_for_meet(
         String,
         String,
         String,
-        Option<String>,
         String,
         Option<String>,
         Option<i32>,
         Option<String>,
         Option<String>,
-        Option<String>,
-        String,
     )> = sqlx::query_as(
         "SELECT b.uid, b.guest_name, b.guest_email, CASE b.time_version WHEN 1 THEN b.start_at ELSE rtrim(b.start_at, 'Z') END AS start_at, CASE b.time_version WHEN 1 THEN b.end_at ELSE rtrim(b.end_at, 'Z') END AS end_at,
-                b.notes, et.title, et.timezone, et.reminder_minutes, b.organizer_name, b.organizer_email,
-                b.guest_phone, et.sms_phone_mode
+                et.title, et.timezone, et.reminder_minutes, b.organizer_name, b.organizer_email
          FROM bookings b
          JOIN event_types et ON et.id = b.event_type_id
          WHERE b.id = ?",
@@ -1035,14 +1031,11 @@ async fn booking_details_for_meet(
         guest_email,
         start_at,
         end_at,
-        notes,
         title,
         et_timezone,
         reminder_minutes,
         organizer_name,
         organizer_email,
-        guest_phone,
-        sms_phone_mode,
     ) = booking?;
 
     // A multi-host booking keeps the organizer it was created with (#161);
@@ -1076,12 +1069,11 @@ async fn booking_details_for_meet(
     let (date, start_time) = split_stored_datetime(&start_at)?;
     let (_, end_time) = split_stored_datetime(&end_at)?;
 
-    let attendees: Vec<(String,)> =
-        sqlx::query_as("SELECT email FROM booking_attendees WHERE booking_id = ?")
-            .bind(booking_id)
-            .fetch_all(pool)
-            .await
-            .unwrap_or_default();
+    // What the guest typed, read the way every other push reads it, so the
+    // Meet copy cannot drift from the CalDAV one (#266).
+    let (notes, guest_phone) = crate::web::booking_guest_input(pool, &uid).await;
+    let additional_attendees = crate::web::booking_additional_attendees(pool, &uid).await;
+    let sequence = crate::web::booking_ics_sequence(pool, &uid).await;
 
     Some(crate::email::BookingDetails {
         utc_times,
@@ -1098,12 +1090,13 @@ async fn booking_details_for_meet(
         notes,
         // The phone goes into the host's calendar copy like every other
         // write-back (#261), labelled in the host's language.
-        guest_phone: guest_phone.filter(|_| crate::sms::collects_phone(&sms_phone_mode)),
+        guest_phone,
         location: None,
         reminder_minutes,
-        additional_attendees: attendees.into_iter().map(|(e,)| e).collect(),
+        additional_attendees,
         host_language: crate::email::user_language(pool, owner_id).await,
         host_timezone: host_tz.to_string(),
+        sequence,
         ..Default::default()
     })
 }

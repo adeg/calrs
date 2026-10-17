@@ -1029,7 +1029,9 @@ async fn build_oidc_client_with_redirect(
     let http_client = build_http_client()?;
     let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
         .await
-        .map_err(|e| anyhow::anyhow!("OIDC discovery failed: {}", e))?;
+        // Kept as a source rather than flattened into the message, so the
+        // log shows why discovery failed (provider metadata is public).
+        .context("OIDC discovery failed")?;
 
     let redirect_url = RedirectUrl::new(format!(
         "{}/auth/oidc/callback",
@@ -1051,7 +1053,9 @@ async fn oidc_login(State(state): State<Arc<AppState>>) -> Response {
 
     let client = match build_oidc_client_with_redirect(&auth_config, &state.secret_key).await {
         Ok(c) => c,
-        Err(e) => return crate::web::oidc_error_response("oidc client build (login)", &e),
+        Err(e) => {
+            return crate::web::oidc_error_response("oidc client build (login)", &format!("{e:#}"))
+        }
     };
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
@@ -1159,18 +1163,23 @@ async fn oidc_callback(
 
     let client = match build_oidc_client_with_redirect(&auth_config, &state.secret_key).await {
         Ok(c) => c,
-        Err(e) => return crate::web::oidc_error_response("oidc client build (callback)", &e),
+        Err(e) => {
+            return crate::web::oidc_error_response(
+                "oidc client build (callback)",
+                &format!("{e:#}"),
+            )
+        }
     };
 
     let http_client = match build_http_client() {
         Ok(c) => c,
-        Err(e) => return crate::web::oidc_error_response("oidc http client", &e),
+        Err(e) => return crate::web::oidc_error_response("oidc http client", &format!("{e:#}")),
     };
 
     // Exchange code for tokens
     let token_request = match client.exchange_code(AuthorizationCode::new(query.code)) {
         Ok(r) => r,
-        Err(e) => return crate::web::oidc_error_response("oidc exchange_code", &e),
+        Err(e) => return crate::web::oidc_error_response_with_source("oidc exchange_code", &e),
     };
     let token_response = match token_request
         .set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier_secret))
@@ -1178,7 +1187,23 @@ async fn oidc_callback(
         .await
     {
         Ok(t) => t,
-        Err(e) => return crate::web::oidc_error_response("oidc token exchange", &e),
+        // A body that fails to parse displays only as "Failed to parse server
+        // response" and its source can quote JSON values, tokens included, so
+        // it gets a dedicated line: where serde stopped, the reason with its
+        // quoted values masked, and the body's shape without its values.
+        // `path` is "." for any id_token or claim error, because the token
+        // response flattens its extra fields; the claim name is in `reason`.
+        Err(openidconnect::RequestTokenError::Parse(parse_err, body)) => {
+            tracing::error!(
+                context = "oidc token exchange",
+                path = %parse_err.path(),
+                reason = %redact_reason(&parse_err.inner().to_string()),
+                body = %summarize_token_response_body(&body),
+                "oidc auth failure: token response did not parse"
+            );
+            return crate::web::oidc_failure_response();
+        }
+        Err(e) => return crate::web::oidc_error_response_with_source("oidc token exchange", &e),
     };
 
     // Verify and extract ID token claims
@@ -1201,7 +1226,7 @@ async fn oidc_callback(
         .set_other_audience_verifier_fn(|_aud| true);
     let claims = match id_token.claims(&verifier, &Nonce::new(stored_nonce)) {
         Ok(c) => c,
-        Err(e) => return crate::web::oidc_error_response("oidc id_token verify", &e),
+        Err(e) => return crate::web::oidc_error_response_with_source("oidc id_token verify", &e),
     };
 
     // Since we now accept additional audiences, restore the `azp` defense that
@@ -1273,7 +1298,7 @@ async fn oidc_callback(
         Ok(id) => id,
         Err(e) => {
             tracing::warn!(email = %email, error = %e, "OIDC callback failed: account error");
-            return crate::web::oidc_error_response("oidc account link/create", &e);
+            return crate::web::oidc_error_response("oidc account link/create", &format!("{e:#}"));
         }
     };
 
@@ -1509,6 +1534,228 @@ fn render_register_error(
     ([("Set-Cookie", csrf_cookie_value(&csrf_token))], body).into_response()
 }
 
+// --- OIDC token response diagnostics (#264) ---
+
+/// Longest serde reason logged after masking, in chars.
+const REASON_MAX_CHARS: usize = 512;
+
+/// Mask every quoted or backticked literal in a serde message from a failed
+/// token response parse, and cap its length. Those literals are the values
+/// serde complains about (an access token or, for an id_token claim of the
+/// wrong type, an address, email or phone number), so each one becomes
+/// `<string N chars>` unless it is a short `[A-Za-z0-9.-]` word with at
+/// most six digits, such as `"3600"` or `"true"` (see `keeps_literal`).
+/// Unquoted text, the field and type names that say
+/// what went wrong, is kept.
+fn redact_reason(message: &str) -> String {
+    // Bound the scan as well as the output. A literal cut by the bound is
+    // unclosed, so it stays masked through the end.
+    let chars: Vec<char> = message.chars().take(4 * REASON_MAX_CHARS).collect();
+    let mut out = String::with_capacity(message.len());
+    mask_literals(&chars, 0, None, &mut out);
+    if out.chars().count() > REASON_MAX_CHARS {
+        out = out.chars().take(REASON_MAX_CHARS).collect();
+        out.push_str("...");
+    }
+    out
+}
+
+/// The delimiter of a literal in a serde message.
+#[derive(Clone, Copy, PartialEq)]
+enum Delim {
+    /// A double quote after this many backslashes: `"` is 0 and `\"` is 1.
+    /// openidconnect wraps claim errors in `Debug`, which nests a message
+    /// quoting a value inside another quoted string, so the count tells the
+    /// levels apart.
+    Quote(usize),
+    Backtick,
+}
+
+/// The delimiter starting at `chars[i]`, if any, and its length in chars.
+fn delim_at(chars: &[char], i: usize) -> Option<(Delim, usize)> {
+    if chars[i] == '`' {
+        return Some((Delim::Backtick, 1));
+    }
+    let backslashes = chars[i..].iter().take_while(|&&c| c == '\\').count();
+    (chars.get(i + backslashes) == Some(&'"'))
+        .then_some((Delim::Quote(backslashes), backslashes + 1))
+}
+
+/// Copy `chars[i..]` into `out` up to the delimiter `close` (the end of the
+/// text when `None`), masking the literals inside. Returns the index after
+/// `close`, or `None` when the text ends first. An unclosed literal masks
+/// everything from its opening to the end, so a message shaped differently
+/// than expected fails closed.
+fn mask_literals(
+    chars: &[char],
+    mut i: usize,
+    close: Option<Delim>,
+    out: &mut String,
+) -> Option<usize> {
+    while i < chars.len() {
+        let Some((delim, open_len)) = delim_at(chars, i) else {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        };
+        if Some(delim) == close {
+            return Some(i + open_len);
+        }
+        let start = i + open_len;
+        let mut inner = String::new();
+        let end = match delim {
+            // Backticks do not nest: everything up to the next one is a value.
+            Delim::Backtick => chars[start..]
+                .iter()
+                .position(|&c| c == '`')
+                .map(|p| start + p + 1),
+            Delim::Quote(_) => mask_literals(chars, start, Some(delim), &mut inner),
+        };
+        let Some(end) = end else {
+            if close.is_some() {
+                return None;
+            }
+            out.push_str(&format!("<string {} chars>", chars.len() - start));
+            return Some(chars.len());
+        };
+        let raw = &chars[start..end - open_len];
+        if raw.iter().any(|&c| c == '"' || c == '`') && wraps_error_message(&chars[..i]) {
+            // A `Debug`-wrapped serde message quoting values of its own:
+            // keep its text and the masked values inside. Any other quoted
+            // text holding quotes is a value with quotes in it (serde writes
+            // `string "a \"b\" c"`), so it is masked whole below.
+            out.extend(&chars[i..start]);
+            out.push_str(&inner);
+            out.extend(&chars[end - open_len..end]);
+        } else if keeps_literal(raw) {
+            out.extend(&chars[i..end]);
+        } else {
+            out.push_str(&format!("<string {} chars>", raw.len()));
+        }
+        i = end;
+    }
+    close.is_none().then_some(i)
+}
+
+/// Whether the text before a quoted literal opens a `Debug`-formatted
+/// serde_json error, `Error("message", line: .., column: ..)`, which is how
+/// openidconnect reports an id_token claim of the wrong type.
+fn wraps_error_message(before: &[char]) -> bool {
+    before.ends_with(&['E', 'r', 'r', 'o', 'r', '('])
+}
+
+/// Whether a literal is harmless enough to log as is: a short
+/// `[A-Za-z0-9.-]` word (`"true"`, `"Bearer"`, `"1.0"`) with at most six
+/// digits, enough for `"3600"` or an `expires_in` of `"86400"`. Seven
+/// digits or more could be a phone number, so it is masked.
+fn keeps_literal(raw: &[char]) -> bool {
+    raw.len() <= 8
+        && raw
+            .iter()
+            .all(|&c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        && raw.iter().filter(|c| c.is_ascii_digit()).count() <= 6
+}
+
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// `{key: type, ...}` for a JSON object, keys sorted, values never shown.
+/// Keys are IdP-chosen names, so they are capped in length and count.
+fn json_shape(map: &serde_json::Map<String, serde_json::Value>) -> String {
+    let mut fields: Vec<String> = map
+        .iter()
+        .map(|(k, v)| {
+            let key: String = k.chars().take(64).collect();
+            format!("{key:?}: {}", json_type_name(v))
+        })
+        .collect();
+    fields.sort();
+    let more = fields.len().saturating_sub(50);
+    fields.truncate(50);
+    if more > 0 {
+        fields.push(format!("... {more} more"));
+    }
+    format!("{{{}}}", fields.join(", "))
+}
+
+/// Decode one base64url JWT segment into a JSON object, tolerating padding.
+fn decode_jwt_segment(segment: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(segment.trim_end_matches('='))
+        .ok()?;
+    match serde_json::from_slice(&bytes).ok()? {
+        serde_json::Value::Object(map) => Some(map),
+        _ => None,
+    }
+}
+
+/// What an `id_token` string looks like: segment count, the JOSE header's
+/// `alg`/`typ`/`kid` (no other header field), and the claim names and types
+/// of a three-segment token. The signature is never decoded or shown.
+fn summarize_id_token(token: &str) -> String {
+    let segments: Vec<&str> = token.split('.').collect();
+    let mut out = format!("{} segments", segments.len());
+    match decode_jwt_segment(segments[0]) {
+        Some(header) => {
+            let picked: Vec<String> = ["alg", "typ", "kid"]
+                .iter()
+                .filter_map(|name| {
+                    let v = header.get(*name)?;
+                    Some(match v.as_str() {
+                        Some(s) => format!("{name}: {:?}", s.chars().take(64).collect::<String>()),
+                        None => format!("{name}: {}", json_type_name(v)),
+                    })
+                })
+                .collect();
+            out.push_str(&format!(", header {{{}}}", picked.join(", ")));
+        }
+        None => out.push_str(", header not decodable"),
+    }
+    // Five segments is a JWE: the second one is an encrypted key, not claims.
+    if segments.len() == 3 {
+        match decode_jwt_segment(segments[1]) {
+            Some(claims) => out.push_str(&format!(", claims {}", json_shape(&claims))),
+            None => out.push_str(", claims not decodable"),
+        }
+    }
+    out
+}
+
+/// Describe a token endpoint body that `oauth2` failed to parse, without
+/// any of its values: its length, then for a JSON object each top-level key
+/// with the JSON type of its value, and for a string `id_token` the summary
+/// from `summarize_id_token`. Tokens are never part of the output, so the
+/// line is safe to log at error level.
+fn summarize_token_response_body(body: &[u8]) -> String {
+    let len = body.len();
+    let value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        // An HTML page here is usually a proxy or IdP error page; say so
+        // without echoing it.
+        Err(_) if body.trim_ascii_start().starts_with(b"<") => {
+            return format!("{len} bytes, not JSON (looks like HTML)")
+        }
+        Err(_) => return format!("{len} bytes, not JSON"),
+    };
+    let map = match value {
+        serde_json::Value::Object(map) => map,
+        other => return format!("{len} bytes, JSON {}", json_type_name(&other)),
+    };
+    let mut out = format!("{len} bytes, JSON object {}", json_shape(&map));
+    if let Some(serde_json::Value::String(token)) = map.get("id_token") {
+        out.push_str(&format!(", id_token: {}", summarize_id_token(token)));
+    }
+    out
+}
+
 // --- OIDC group sync ---
 
 /// Extract the `groups` claim from a raw JWT ID token.
@@ -1704,6 +1951,262 @@ pub fn generate_group_slug(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- token response diagnostics (#264) ---
+
+    fn b64(s: &str) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s)
+    }
+
+    const ACCESS: &str = "AT-secret-0123456789abcdefghijklmnop";
+    const SIG: &str = "c2lnbmF0dXJlLXNlY3JldC1ieXRlcy0wMTIzNDU2Nzg5";
+
+    #[test]
+    fn token_body_summary_lists_keys_and_types_only() {
+        let id_token = format!(
+            "{}.{}.{SIG}",
+            b64(r#"{"alg":"RS256","typ":"JWT","kid":"k1","x5c":["MIIsecret"]}"#),
+            b64(r#"{"sub":"u-42","aud":["c"],"email_verified":"true","iat":1}"#)
+        );
+        let body = format!(
+            r#"{{"access_token":"{ACCESS}","expires_in":"3600","id_token":"{id_token}","token_type":"Bearer"}}"#
+        );
+        let s = summarize_token_response_body(body.as_bytes());
+        assert_eq!(
+            s,
+            format!(
+                "{} bytes, JSON object {{\"access_token\": string, \"expires_in\": string, \
+                 \"id_token\": string, \"token_type\": string}}, id_token: 3 segments, \
+                 header {{alg: \"RS256\", typ: \"JWT\", kid: \"k1\"}}, claims {{\"aud\": array, \
+                 \"email_verified\": string, \"iat\": number, \"sub\": string}}",
+                body.len()
+            )
+        );
+        assert!(!s.contains(ACCESS));
+        assert!(!s.contains(SIG));
+        assert!(!s.contains("u-42"));
+        assert!(!s.contains("MIIsecret"));
+    }
+
+    #[test]
+    fn token_body_summary_handles_unsigned_and_odd_tokens() {
+        let unsigned = format!("{}.{}.", b64(r#"{"alg":"none"}"#), b64(r#"{"sub":"x"}"#));
+        let body = format!(r#"{{"id_token":"{unsigned}"}}"#);
+        let s = summarize_token_response_body(body.as_bytes());
+        assert!(
+            s.ends_with(r#"id_token: 3 segments, header {alg: "none"}, claims {"sub": string}"#),
+            "{s}"
+        );
+
+        let s = summarize_token_response_body(br#"{"id_token":"not-a-jwt"}"#);
+        assert!(
+            s.ends_with("id_token: 1 segments, header not decodable"),
+            "{s}"
+        );
+
+        let jwe = format!("{}.a.b.c.d", b64(r#"{"alg":"RSA-OAEP","enc":"A256GCM"}"#));
+        let body = format!(r#"{{"id_token":"{jwe}"}}"#);
+        let s = summarize_token_response_body(body.as_bytes());
+        assert!(
+            s.ends_with(r#"id_token: 5 segments, header {alg: "RSA-OAEP"}"#),
+            "{s}"
+        );
+
+        let s = summarize_token_response_body(br#"{"id_token":null}"#);
+        assert!(s.ends_with(r#"{"id_token": null}"#), "{s}");
+    }
+
+    #[test]
+    fn token_body_summary_never_echoes_non_json_or_non_objects() {
+        let body = format!("access_token={ACCESS}&token_type=bearer");
+        assert_eq!(
+            summarize_token_response_body(body.as_bytes()),
+            format!("{} bytes, not JSON", body.len())
+        );
+        assert_eq!(summarize_token_response_body(b""), "0 bytes, not JSON");
+        assert_eq!(
+            summarize_token_response_body(format!(r#"["{ACCESS}"]"#).as_bytes()),
+            format!("{} bytes, JSON array", ACCESS.len() + 4)
+        );
+        let page = format!("\n  <html><body>502 Bad Gateway {ACCESS}</body></html>");
+        let s = summarize_token_response_body(page.as_bytes());
+        assert_eq!(
+            s,
+            format!("{} bytes, not JSON (looks like HTML)", page.len())
+        );
+    }
+
+    #[test]
+    fn redact_reason_keeps_short_words_and_masks_other_literals() {
+        let msg = r#"invalid type: string "3600", expected u64 at line 1 column 40"#;
+        assert_eq!(redact_reason(msg), msg);
+        let msg =
+            format!(r#"invalid type: string "{ACCESS}", expected struct StandardTokenResponse"#);
+        assert_eq!(
+            redact_reason(&msg),
+            "invalid type: string <string 36 chars>, expected struct StandardTokenResponse"
+        );
+        // `~` and `%` are not base64url, which the quoting rule does not need.
+        let msg = r#"invalid type: string "rt~very~secret~value~0123", expected u64"#;
+        assert_eq!(
+            redact_reason(msg),
+            "invalid type: string <string 25 chars>, expected u64"
+        );
+        // Backticked values and unclosed literals are masked too.
+        assert_eq!(
+            redact_reason("invalid type: integer `33612345678`, expected a boolean"),
+            "invalid type: integer <string 11 chars>, expected a boolean"
+        );
+        assert_eq!(
+            redact_reason(r#"phone_number_verified: "+33 6 12"#),
+            "phone_number_verified: <string 8 chars>"
+        );
+    }
+
+    #[test]
+    fn redact_reason_masks_short_literals_with_seven_digits_or_more() {
+        // An eight-digit local phone number fits the short-word length.
+        assert_eq!(
+            redact_reason(r#"invalid type: string "06123456", expected a boolean"#),
+            "invalid type: string <string 8 chars>, expected a boolean"
+        );
+        assert_eq!(
+            redact_reason("invalid type: integer `1234567`, expected a boolean"),
+            "invalid type: integer <string 7 chars>, expected a boolean"
+        );
+        // Small numbers and words stay readable.
+        for msg in [
+            r#"invalid type: string "86400", expected u64"#,
+            r#"invalid type: string "123456", expected u64"#,
+            r#"unknown variant "Bearer2", expected one of"#,
+        ] {
+            assert_eq!(redact_reason(msg), msg);
+        }
+    }
+
+    #[test]
+    fn redact_reason_caps_its_length() {
+        let msg = "é".repeat(2000);
+        let out = redact_reason(&msg);
+        assert_eq!(out.chars().count(), REASON_MAX_CHARS + 3);
+        assert!(out.ends_with("..."));
+    }
+
+    #[test]
+    fn bad_claim_reason_keeps_the_claim_name_and_masks_its_value() {
+        // A wrong-typed claim fails the whole token response parse, inside a
+        // serde message that openidconnect wraps in `Debug`.
+        type Resp = openidconnect::core::CoreTokenResponse;
+        let address = "12 Rue de la Paix, 75002 Paris, Jean Dupont";
+        let email = "jean.dupont@example.com";
+        for (claim, value) in [("address", address), ("email_verified", email)] {
+            let claims = format!(
+                r#"{{"iss":"https://idp","sub":"s","aud":"c","exp":1,"iat":1,"{claim}":"{value}"}}"#
+            );
+            let id_token = format!("{}.{}.{SIG}", b64(r#"{"alg":"RS256"}"#), b64(&claims));
+            let body = format!(
+                r#"{{"access_token":"{ACCESS}","token_type":"Bearer","id_token":"{id_token}"}}"#
+            );
+            let err = serde_json::from_slice::<Resp>(body.as_bytes()).unwrap_err();
+            let reason = redact_reason(&err.to_string());
+            assert!(reason.contains(claim), "{reason}");
+            assert!(
+                !reason.contains("Paix") && !reason.contains("dupont"),
+                "{reason}"
+            );
+            assert!(
+                !reason.contains(ACCESS) && !reason.contains(SIG),
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_with_quotes_in_it_is_masked_whole() {
+        // serde escapes quotes inside a string value, which used to read as a
+        // nested message: the text around the inner quotes was logged.
+        type Resp = openidconnect::core::CoreTokenResponse;
+        let value = r#"Jean \"JD\" Dupont, 12 Rue de la Paix"#;
+        let top = format!(r#"{{"access_token":"x","token_type":"Bearer","expires_in":"{value}"}}"#);
+        let claims = format!(
+            r#"{{"iss":"https://idp","sub":"s","aud":"c","exp":1,"iat":1,"email_verified":"{value}"}}"#
+        );
+        let id_token = format!("{}.{}.{SIG}", b64(r#"{"alg":"RS256"}"#), b64(&claims));
+        let in_claim =
+            format!(r#"{{"access_token":"x","token_type":"Bearer","id_token":"{id_token}"}}"#);
+        for body in [top, in_claim] {
+            let err = serde_json::from_slice::<Resp>(body.as_bytes()).unwrap_err();
+            let reason = redact_reason(&err.to_string());
+            for part in ["Jean", "JD", "Dupont", "Paix"] {
+                assert!(!reason.contains(part), "{reason}");
+            }
+            assert!(reason.contains("invalid type"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn redact_reason_bounds_its_scan_and_keeps_a_cut_literal_masked() {
+        let msg = format!(r#"invalid type: string "{}""#, "secret ".repeat(1000));
+        let out = redact_reason(&msg);
+        assert!(!out.contains("secret"), "{out}");
+        assert!(out.chars().count() <= REASON_MAX_CHARS + 3);
+    }
+
+    #[tokio::test]
+    async fn discovery_failure_keeps_its_cause_chain() {
+        // Serve provider metadata that does not parse, and check the error
+        // the callback logs says why rather than only "discovery failed".
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/.well-known/openid-configuration",
+            get(|| async { ([("content-type", "application/json")], r#"{"issuer":5}"#) }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let cfg = AuthConfig {
+            id: "singleton".to_string(),
+            registration_enabled: false,
+            allowed_email_domains: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            oidc_enabled: true,
+            oidc_issuer_url: Some(format!("http://{addr}")),
+            oidc_client_id: Some("c".to_string()),
+            oidc_client_secret: None,
+            oidc_auto_register: false,
+            google_oauth2_client_id: None,
+            google_oauth2_client_secret: None,
+        };
+        let err = build_oidc_client_with_redirect(&cfg, &[0u8; 32])
+            .await
+            .unwrap_err();
+        let logged = format!("{err:#}");
+        assert!(logged.starts_with("OIDC discovery failed: "), "{logged}");
+        assert!(logged.contains("invalid type"), "{logged}");
+    }
+
+    #[test]
+    fn real_parse_failure_is_summarized_safely() {
+        // Drive openidconnect's own token response type over a body that
+        // fails to parse, the way the callback receives it, and check what
+        // the diagnostic line would carry.
+        type Resp = openidconnect::core::CoreTokenResponse;
+        let id_token = format!(
+            "{}.{}.{SIG}",
+            b64(r#"{"alg":"RS256"}"#),
+            b64(r#"{"iss":"https://idp","sub":"s","aud":"c","exp":1,"iat":1}"#)
+        );
+        let body = format!(
+            r#"{{"access_token":"{ACCESS}","token_type":"Bearer","expires_in":"3600","id_token":"{id_token}"}}"#
+        );
+        let err = serde_json::from_slice::<Resp>(body.as_bytes()).unwrap_err();
+        let reason = redact_reason(&err.to_string());
+        assert!(reason.contains("3600"), "{reason}");
+        assert!(
+            !reason.contains(ACCESS) && !reason.contains(SIG),
+            "{reason}"
+        );
+    }
 
     // --- is_email_allowed ---
 

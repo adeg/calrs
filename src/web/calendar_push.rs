@@ -838,8 +838,10 @@ pub(super) async fn booking_resource_label(pool: &SqlitePool, booking_uid: &str)
 /// stored before the mode was switched off is not shown). Paths that rebuild
 /// `BookingDetails` from the row (approval, reschedule, claim, reminders) use
 /// this so the host emails and the calendar event carry what the booking
-/// form's own emails did (#261).
-pub(super) async fn booking_guest_input(
+/// form's own emails did (#261). The write-back retry, the Meet path and the
+/// pending sweep read them here too rather than from their own row queries,
+/// whose copies had already drifted (#266).
+pub(crate) async fn booking_guest_input(
     pool: &SqlitePool,
     booking_uid: &str,
 ) -> (Option<String>, Option<String>) {
@@ -864,8 +866,9 @@ pub(super) async fn booking_guest_input(
 
 /// The additional attendees the guest invited, for paths that rebuild
 /// `BookingDetails` from the row: without them an approved or rescheduled
-/// booking's calendar event lists only the guest.
-pub(super) async fn booking_additional_attendees(
+/// booking's calendar event lists only the guest. One order for every push,
+/// so a rewrite never reorders the ATTENDEE lines.
+pub(crate) async fn booking_additional_attendees(
     pool: &SqlitePool,
     booking_uid: &str,
 ) -> Vec<String> {
@@ -878,6 +881,81 @@ pub(super) async fn booking_additional_attendees(
     .fetch_all(pool)
     .await
     .unwrap_or_default()
+}
+
+/// The SEQUENCE of the booking's invite, bumped by each reschedule (#267).
+/// Every path that rebuilds an invite, a cancellation or a calendar push
+/// from the row reads it here, so a moved booking's copies update in place
+/// and its cancellation is not ignored as older than the copy it cancels.
+pub(crate) async fn booking_ics_sequence(pool: &SqlitePool, booking_uid: &str) -> u32 {
+    sqlx::query_scalar::<_, i64>("SELECT ics_sequence FROM bookings WHERE uid = ?")
+        .bind(booking_uid)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0)
+}
+
+/// Saved language of the watcher who claimed the booking, under the address
+/// the claim listed them as an attendee with (#267). The attendee emails a
+/// later reschedule or cancellation sends them read it instead of the
+/// guest's. Empty when nobody claimed it or the claimant has no saved one.
+pub(crate) async fn booking_attendee_languages(
+    pool: &SqlitePool,
+    booking_uid: &str,
+) -> Vec<(String, String)> {
+    sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT COALESCE(u.booking_email, u.email), u.language FROM bookings b
+         JOIN users u ON u.id = b.claimed_by_user_id WHERE b.uid = ?",
+    )
+    .bind(booking_uid)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .filter_map(|(email, lang)| crate::email::supported_language(lang).map(|l| (email, l)))
+    .collect()
+}
+
+/// Fill in who holds the invite of a booking being cancelled, declined or
+/// expired (#267): whether it was ever confirmed (`first_confirmed_at`), and
+/// then its additional attendees with their languages. A booking never
+/// confirmed sent no invite, so its attendees are left empty and get
+/// nothing. `was_pending` says the booking ended while awaiting approval:
+/// if it was confirmed before, that was a reschedule, and the times on the
+/// row are the requested ones rather than those of the copies.
+pub(crate) async fn with_invite_holders(
+    pool: &SqlitePool,
+    details: crate::email::CancellationDetails,
+    was_pending: bool,
+) -> crate::email::CancellationDetails {
+    let invite_sent = sqlx::query_scalar::<_, bool>(
+        "SELECT first_confirmed_at IS NOT NULL FROM bookings WHERE uid = ?",
+    )
+    .bind(&details.uid)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(false);
+    if !invite_sent {
+        return crate::email::CancellationDetails {
+            invite_sent: false,
+            reschedule_pending: false,
+            additional_attendees: Vec::new(),
+            attendee_languages: Vec::new(),
+            ..details
+        };
+    }
+    crate::email::CancellationDetails {
+        invite_sent: true,
+        reschedule_pending: was_pending,
+        additional_attendees: booking_additional_attendees(pool, &details.uid).await,
+        attendee_languages: booking_attendee_languages(pool, &details.uid).await,
+        ..details
+    }
 }
 
 /// Release one specific resource's reservation for a booking, fetched by

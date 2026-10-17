@@ -140,6 +140,63 @@ pub async fn drain_emails(timeout: std::time::Duration) {
     }
 }
 
+/// The guest-side emails of an approval, shared by the token and dashboard
+/// paths. A new request gets the confirmation and its attendees "you've
+/// been added". A reschedule of a booking confirmed before
+/// (`reschedule_approval`, see `was_confirmed_before`) gets "your new time
+/// is confirmed" with the moved invite, matching the "moved" SMS, and its
+/// attendees the moved invite (#266, #267). `notice_min` is the event
+/// type's (cancel, reschedule) notice window.
+pub(super) async fn send_approval_guest_emails(
+    smtp_config: &crate::email::SmtpConfig,
+    details: &crate::email::BookingDetails,
+    cancel_url: Option<&str>,
+    reschedule_url: Option<&str>,
+    notice_min: (Option<i32>, Option<i32>),
+    reschedule_approval: bool,
+) {
+    let (cancel_notice_min, reschedule_notice_min) = notice_min;
+    if reschedule_approval {
+        log_email_result(
+            crate::email::send_guest_reschedule_approved(
+                smtp_config,
+                details,
+                cancel_url,
+                reschedule_url,
+                cancel_notice_min,
+                reschedule_notice_min,
+            )
+            .await,
+            "guest_reschedule_approved",
+            &details.uid,
+        );
+        log_email_result(
+            crate::email::send_guest_attendee_reschedule(smtp_config, details, None).await,
+            "attendee_reschedule",
+            &details.uid,
+        );
+    } else {
+        log_email_result(
+            crate::email::send_guest_confirmation_ex(
+                smtp_config,
+                details,
+                cancel_url,
+                reschedule_url,
+                cancel_notice_min,
+                reschedule_notice_min,
+            )
+            .await,
+            "guest_confirmation",
+            &details.uid,
+        );
+        log_email_result(
+            crate::email::send_guest_attendee_confirmations(smtp_config, details).await,
+            "attendee_confirmation",
+            &details.uid,
+        );
+    }
+}
+
 /// Everything the new-booking emails need, owned so it can outlive the
 /// request. Shared by the four guest booking handlers (personal, user-scoped,
 /// dynamic group, team), which used to repeat the same send sequence inline.
@@ -210,6 +267,11 @@ pub(super) fn send_new_booking_emails(m: NewBookingEmails) {
                 )
                 .await,
                 "guest_confirmation",
+                uid,
+            );
+            log_email_result(
+                crate::email::send_guest_attendee_confirmations(&m.smtp_config, &m.details).await,
+                "attendee_confirmation",
                 uid,
             );
             for (name, email, language) in &m.host_recipients {
@@ -369,6 +431,8 @@ async fn send_due_reminders(pool: SqlitePool, secret_key: [u8; 32]) {
             host_language: crate::email::supported_language(host_language.clone()),
             host_timezone: stored_tz_str.to_string(),
             resource_name: booking_resource_label(&pool, uid).await,
+            sequence: booking_ics_sequence(&pool, uid).await,
+            attendee_languages: Vec::new(),
         };
 
         let guest_cancel_url = cancel_token.as_ref().and_then(|t| {
@@ -416,34 +480,16 @@ async fn send_due_reminders(pool: SqlitePool, secret_key: [u8; 32]) {
             notified = true;
         }
 
-        // Reminder SMS to the guest. Queried per booking rather than
-        // joined into `due` above: sqlx only derives FromRow for tuples up
-        // to 16 elements, and that one is already at the limit.
+        // Reminder SMS to the guest. `details.guest_phone` is already the
+        // number `booking_guest_input` keeps only when the event type
+        // collects one, so it needs no second lookup (#266).
         if sms_configured {
-            let sms_target: Option<(Option<String>, String)> = sqlx::query_as(
-                "SELECT b.guest_phone, et.sms_phone_mode FROM bookings b
-                 JOIN event_types et ON et.id = b.event_type_id WHERE b.id = ?",
-            )
-            .bind(bid)
-            .fetch_optional(&pool)
-            .await
-            .unwrap_or(None);
-
-            if let Some((phone, phone_mode)) = sms_target {
-                if let Some(ctx) = crate::sms::SmsContext::for_booking(
-                    &details,
-                    phone.as_deref(),
-                    crate::sms::collects_phone(&phone_mode),
-                ) {
-                    crate::sms::notify_guest(
-                        &pool,
-                        &secret_key,
-                        crate::sms::SmsEvent::Reminder,
-                        ctx,
-                    )
+            if let Some(ctx) =
+                crate::sms::SmsContext::for_booking(&details, details.guest_phone.as_deref(), true)
+            {
+                crate::sms::notify_guest(&pool, &secret_key, crate::sms::SmsEvent::Reminder, ctx)
                     .await;
-                    notified = true;
-                }
+                notified = true;
             }
         }
 

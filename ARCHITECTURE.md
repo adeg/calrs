@@ -164,7 +164,20 @@ Call sites use `crate::email::name` whatever file `name` lives in.
   `declined`. Creation: `src/web/booking.rs`. Pending hold and expiry:
   `src/web/pending.rs`. Approve/decline/cancel/reschedule/claim by token:
   `src/web/booking_actions.rs`; the same from the dashboard:
-  `src/web/dashboard.rs`. Storage of times: `src/booking_time.rs`.
+  `src/web/dashboard.rs`. Storage of times: `src/booking_time.rs`. Paths
+  that rebuild `BookingDetails` from the row read what the guest typed
+  through `booking_guest_input`, `booking_additional_attendees` and
+  `booking_ics_sequence` (`src/web/calendar_push.rs`), not their own
+  queries. A trigger stamps `bookings.first_confirmed_at` (migration 071),
+  so an approval can tell a rescheduled booking from a new request: it texts
+  and emails the guest "moved" and sends the attendees the moved invite
+  instead of "added". Every path that ends a booking reads who holds its
+  invite through `with_invite_holders`, so its attendees, and the guest of a
+  declined or expired reschedule, get a CANCEL only when an invite went out. A
+  reschedule bumps `bookings.ics_sequence` (migration 072), the SEQUENCE
+  every invite, CANCEL and push carries; so does ending a confirmed booking,
+  so its CANCEL outranks the copy it ends. ICS text is folded once per
+  generator by `fold_ics` (`src/email/render.rs`).
 - **Organizer snapshot** (`src/web/hosts.rs`, migration
   `070_booking_organizer.sql`). Multi-host bookings store the organizer they
   were created with, so a later push never changes the ICS organizer (Google

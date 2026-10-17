@@ -49,6 +49,10 @@ use branding::*;
 pub(crate) use calendar_push::caldav_delete_booking;
 pub(crate) use calendar_push::resource_delete_booking;
 use calendar_push::*;
+pub(crate) use calendar_push::{
+    booking_additional_attendees, booking_attendee_languages, booking_guest_input,
+    booking_ics_sequence, with_invite_holders,
+};
 use dashboard::*;
 use event_types::*;
 use format::*;
@@ -287,6 +291,43 @@ pub(crate) fn oidc_error_response<E: std::fmt::Display + ?Sized>(
     error: &E,
 ) -> Response {
     tracing::error!(error = %error, context = %context, "oidc auth failure");
+    oidc_failure_response()
+}
+
+/// Same as `oidc_error_response`, for a `std::error::Error`: also logs the
+/// `source()` chain as `cause`. `oauth2` errors keep the useful part there
+/// (a token response that fails to parse displays only as "Failed to parse
+/// server response"), so logging `Display` alone hides the reason (#264).
+/// Only for errors whose sources cannot carry token material; the token
+/// exchange's parse failure is logged by its own path in `auth.rs`.
+pub(crate) fn oidc_error_response_with_source(
+    context: &str,
+    error: &(dyn std::error::Error + 'static),
+) -> Response {
+    tracing::error!(
+        error = %error,
+        cause = %error_source_chain(error),
+        context = %context,
+        "oidc auth failure"
+    );
+    oidc_failure_response()
+}
+
+/// The `source()` chain of `error`, outermost first, joined with ": ".
+/// Empty when the error has no source.
+pub(crate) fn error_source_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = Vec::new();
+    let mut current = error.source();
+    while let Some(e) = current {
+        parts.push(e.to_string());
+        current = e.source();
+    }
+    parts.join(": ")
+}
+
+/// The generic OIDC failure response, for a caller that already logged the
+/// detail itself.
+pub(crate) fn oidc_failure_response() -> Response {
     (
         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
         Html("Authentication failed. Please try again or contact your administrator.".to_string()),
