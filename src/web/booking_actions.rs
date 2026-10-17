@@ -2039,6 +2039,10 @@ pub(super) async fn guest_reschedule_booking(
     // keep a copy for the SMS that follows them.
     let sms_timezone = new_guest_timezone.clone();
 
+    // Both branches carry what the guest typed: the host approving the new
+    // time sees it as they did the first time (#266).
+    let (guest_notes, guest_phone_shown) = booking_guest_input(&state.pool, &uid).await;
+
     if needs_approval {
         // Guest-initiated reschedule on requires_confirmation event → pending.
         // Delete the prior CalDAV event (it will be re-pushed if/when the host approves),
@@ -2083,6 +2087,8 @@ pub(super) async fn guest_reschedule_booking(
                 host_email: host_email.clone(),
                 uid: uid.clone(),
                 location: loc_value.clone(),
+                notes: guest_notes.clone(),
+                guest_phone: guest_phone_shown,
                 host_timezone: host_tz.name().to_string(),
                 guest_language: booking_language.clone(),
                 host_language: host_language.clone(),
@@ -2115,7 +2121,7 @@ pub(super) async fn guest_reschedule_booking(
                 host_name: host_name.clone(),
                 host_email,
                 uid: uid.clone(),
-                notes: None,
+                notes: guest_notes,
                 location: loc_value,
                 reminder_minutes: None,
                 additional_attendees: vec![],
@@ -2154,7 +2160,6 @@ pub(super) async fn guest_reschedule_booking(
     } else {
         // Confirmed reschedule (host-initiated or guest on non-confirmation event)
         // Push updated event to CalDAV
-        let (guest_notes, guest_phone_shown) = booking_guest_input(&state.pool, &uid).await;
         let push_details = crate::email::BookingDetails {
             utc_times: crate::booking_time::ics_times(&new_start_at, &new_end_at),
             event_title: et_title.clone(),
@@ -2226,6 +2231,7 @@ pub(super) async fn guest_reschedule_booking(
                 host_timezone: host_tz.name().to_string(),
                 guest_language: booking_language,
                 host_language,
+                ..Default::default()
             };
             spawn_emails(async move {
                 let uid = reschedule_details.uid.as_str();

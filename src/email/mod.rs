@@ -180,6 +180,11 @@ pub struct RescheduleDetails {
     pub host_email: String,
     pub uid: String,
     pub location: Option<String>,
+    /// What the guest typed with the booking, shown in the host's approval
+    /// request for the new time as in the original one (#266). See
+    /// `BookingDetails::notes` and `BookingDetails::guest_phone`.
+    pub notes: Option<String>,
+    pub guest_phone: Option<String>,
     /// Host's IANA timezone (from `users.timezone`). See `BookingDetails::host_timezone`.
     pub host_timezone: String,
     /// Language the guest booked in (`bookings.language`). See

@@ -200,6 +200,64 @@ async fn approval_keeps_the_additional_attendees() {
     mail_to(&mails, "friend@test.com").await;
 }
 
+/// #266: a guest reschedule that needs approval rebuilt the emails with no
+/// notes, so the host's request for the new time lost the phone and the
+/// notes the original request showed, and the guest's pending notice lost
+/// their notes.
+#[tokio::test]
+async fn reschedule_needing_approval_keeps_the_guest_phone_and_notes() {
+    let _env = crate::test_support::ENV_LOCK.lock().await;
+    let (app, pool, _, et_id) = setup_test_app().await;
+    let (port, mails) = spawn_capturing_mta().await;
+    use_capturing_mta(&pool, port).await;
+    sqlx::query(
+        "UPDATE event_types SET requires_confirmation = 1, sms_phone_mode = 'optional' WHERE id = ?",
+    )
+    .bind(&et_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let id = insert_v1_booking(
+        &pool,
+        &et_id,
+        "resched@test.com",
+        Utc::now() + Duration::days(2),
+        30,
+        "confirmed",
+        &[
+            ("guest_phone", Some("+33612345678".to_string())),
+            ("notes", Some("Bring the quote".to_string())),
+        ],
+    )
+    .await;
+    let token: String = sqlx::query_scalar("SELECT reschedule_token FROM bookings WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let csrf = "csrf-266-resched";
+    let response = app
+        .oneshot(post_form_unauthed(
+            &format!("/booking/reschedule/{}", token),
+            csrf,
+            &format!(
+                "_csrf={}&date={}&time=10%3A00&tz=UTC",
+                csrf,
+                far_future_monday()
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let host = mail_to(&mails, "test@example.com").await;
+    assert!(host.contains("+33612345678"), "{host}");
+    assert!(host.contains("Bring the quote"), "{host}");
+    let guest = mail_to(&mails, "resched@test.com").await;
+    assert!(guest.contains("Bring the quote"), "{guest}");
+}
+
 /// The host approving from the dashboard browses in their own language;
 /// the guest still gets the confirmation in the language they booked in.
 /// Before #209 this path never read `bookings.language` and fell back to
