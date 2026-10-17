@@ -1000,7 +1000,10 @@ mod tests {
 
     /// #266: a confirmed booking its guest moved to a time awaiting
     /// approval is pending when 071 runs, and must be stamped as confirmed
-    /// before, or its approval tells the attendees "added" again.
+    /// before, or its approval tells the attendees "added" again. A pending
+    /// window opened after creation is not proof of that: a request moved
+    /// before its first approval opens one too, and must stay NULL, or its
+    /// decline cancels an invite its attendees never got.
     #[tokio::test]
     async fn backfill_071_stamps_pending_bookings_confirmed_before() {
         let pool = memory_pool().await;
@@ -1042,7 +1045,7 @@ mod tests {
             ("claimed", "pending", Some("claimed_by_user_id = 'u1'")),
             ("writeback", "pending", Some("writeback_attempts = 2")),
             (
-                "moved",
+                "moved-request",
                 "pending",
                 Some("pending_since = '2030-01-02T15:00:00Z'"),
             ),
@@ -1096,14 +1099,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             stamped,
-            [
-                "confirmed",
-                "meeting",
-                "claimed",
-                "writeback",
-                "moved",
-                "offered"
-            ]
+            ["confirmed", "meeting", "claimed", "writeback", "offered"]
         );
     }
 

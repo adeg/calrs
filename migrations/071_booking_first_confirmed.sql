@@ -14,22 +14,22 @@
 -- Backfill: bookings confirmed today are stamped with their creation time.
 -- A pending booking can also be a confirmed one that its guest moved to a
 -- time awaiting approval. Nothing records that directly, so a pending row
--- is stamped when it carries a trace that only a confirmation, or that
--- reschedule, leaves:
+-- is stamped when it carries a trace that only a confirmation leaves:
 --   meeting_url              auto meeting links are generated at confirmation
 --   claimed_by_user_id, a booking_claim_tokens row
 --                            watchers are offered a booking once confirmed
 --   writeback_attempts, writeback_error, writeback_alerted_at
 --                            recorded by calendar pushes, made only for
 --                            confirmed bookings, and kept by the reschedule
---   pending_since a minute or more after created_at
---                            the reschedule opened a new pending window
--- Residual: pending_since is only set when the event type expires requests,
--- so a moved booking with none of these traces stays NULL and its attendees
--- get "added" once more at approval, as before. A request rescheduled while
--- still awaiting its first approval is stamped too: at approval its guest is
--- texted "moved" (it was) and its attendees get the moved invite, which
--- still adds the event to their calendar.
+-- A pending window opened after creation (pending_since) is not one: a
+-- request its guest moved before any approval opens one too, and stamping
+-- it would make its decline or expiry send attendees a cancellation for a
+-- booking they never heard of.
+-- Residual: a booking moved after confirmation with none of these traces
+-- stays NULL. At approval its attendees get "added" once more and its guest
+-- is texted "confirmed" rather than "moved"; if it is declined, expires or
+-- is cancelled instead, neither its attendees nor its guest get a CANCEL
+-- for the copy they do hold.
 ALTER TABLE bookings ADD COLUMN first_confirmed_at TEXT;
 UPDATE bookings SET first_confirmed_at = created_at
 WHERE status = 'confirmed'
@@ -40,7 +40,6 @@ WHERE status = 'confirmed'
         OR writeback_attempts > 0
         OR writeback_error IS NOT NULL
         OR writeback_alerted_at IS NOT NULL
-        OR julianday(pending_since) >= julianday(created_at) + 1.0 / 1440
    ));
 CREATE TRIGGER booking_first_confirmed_insert AFTER INSERT ON bookings
 WHEN NEW.status = 'confirmed' AND NEW.first_confirmed_at IS NULL
