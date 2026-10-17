@@ -1267,6 +1267,45 @@ fn decline_notice_without_a_stored_language_is_english() {
     assert!(mail.html.contains("<html lang=\"en\">"));
 }
 
+/// #267: a declined or expired reschedule of a confirmed booking attaches a
+/// CANCEL that removes the guest's original booking, so the text says so;
+/// a new request, which sent no invite, does not.
+#[test]
+fn withdrawn_reschedule_tells_the_guest_the_original_booking_is_cancelled() {
+    let rescheduled = CancellationDetails {
+        invite_sent: true,
+        reschedule_pending: true,
+        ..cancellation_from(&sample_booking_details())
+    };
+    let line = "Your original booking is cancelled as well.";
+    for mail in [
+        compose_guest_decline_notice(&rescheduled),
+        compose_guest_pending_expired(&rescheduled, None),
+    ] {
+        assert!(mail.plain.contains(line), "{}", mail.plain);
+        assert!(mail.html.contains(line));
+        assert!(mail.plain.contains("A calendar cancellation is attached."));
+    }
+
+    let french = CancellationDetails {
+        guest_language: Some("fr".to_string()),
+        ..rescheduled.clone()
+    };
+    let mail = compose_guest_decline_notice(&french);
+    assert!(mail
+        .plain
+        .contains("Votre réservation initiale est également annulée."));
+
+    let request = cancellation_from(&sample_booking_details());
+    for mail in [
+        compose_guest_decline_notice(&request),
+        compose_guest_pending_expired(&request, None),
+    ] {
+        assert!(!mail.plain.contains(line));
+        assert!(!mail.html.contains(line));
+    }
+}
+
 #[test]
 fn html_email_lang_attribute_is_escaped() {
     let html = render_html_email_in("fr\"><script>", "Hi,", "Body", "#000", &[], None, &[]);

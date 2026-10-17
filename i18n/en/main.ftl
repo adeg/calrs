@@ -1438,6 +1438,7 @@ email-attendee-greeting = Hi,
 email-attendee-message = You've been added as an attendee to a booking.
 email-attendee-rescheduled-message = A booking you attend has moved to a new time.
 email-attendee-cancelled-message = A booking you attend has been cancelled.
+email-original-booking-cancelled = Your original booking is cancelled as well.
 email-pick-new-time-subject = Reschedule: { $event }, please pick a new time
 email-pick-new-time-message = { $host } needs to reschedule your booking. Please pick a new time.
 email-pick-new-time-link = Pick a new time: { $url }

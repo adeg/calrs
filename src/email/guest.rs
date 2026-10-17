@@ -912,6 +912,18 @@ fn withdrawn_invite_note(lang: &str, details: &CancellationDetails) -> Option<(S
     })
 }
 
+/// The headline of a decline or an expiry, followed, when it ends a
+/// reschedule of a confirmed booking, by the line saying the original
+/// booking is gone too: the attached CANCEL removes it from the guest's
+/// calendar, and "your request was declined" alone reads as if it stood.
+fn withdrawn_headline(lang: &str, details: &CancellationDetails, headline: String) -> String {
+    if details.invite_sent && details.reschedule_pending {
+        format!("{headline} {}", t(lang, "email-original-booking-cancelled"))
+    } else {
+        headline
+    }
+}
+
 /// The guest's "your request was declined" email, in the language stored
 /// with the booking. Reuses the decline page's wording
 /// (`bae-title-booking-declined`, `bae-body-declined-by-host`).
@@ -932,7 +944,7 @@ pub(super) fn compose_guest_decline_notice(details: &CancellationDetails) -> Com
         "email-confirm-greeting",
         [("name", &details.guest_name)],
     );
-    let headline = t(lang, "bae-body-declined-by-host");
+    let headline = withdrawn_headline(lang, details, t(lang, "bae-body-declined-by-host"));
     let label_event = t(lang, "confirmed-detail-event");
     let label_date = t(lang, "confirmed-detail-date");
     let label_time = t(lang, "confirmed-detail-time");
@@ -1030,7 +1042,7 @@ pub async fn send_guest_pending_expired(
     .await
 }
 
-fn compose_guest_pending_expired(
+pub(super) fn compose_guest_pending_expired(
     details: &CancellationDetails,
     rebook_url: Option<&str>,
 ) -> ComposedEmail {
@@ -1050,7 +1062,7 @@ fn compose_guest_pending_expired(
         "email-confirm-greeting",
         [("name", &details.guest_name)],
     );
-    let headline = t(lang, "email-pending-expired-headline");
+    let headline = withdrawn_headline(lang, details, t(lang, "email-pending-expired-headline"));
     let label_event = t(lang, "confirmed-detail-event");
     let label_date = t(lang, "confirmed-detail-date");
     let label_time = t(lang, "confirmed-detail-time");
