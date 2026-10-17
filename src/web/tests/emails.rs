@@ -303,8 +303,10 @@ async fn approving_a_reschedule_moves_the_attendees_copy() {
             "{guest}"
         );
         assert!(guest.contains("SEQUENCE:1"), "{guest}");
-        // One email to the attendee: the move, not "you've been added".
-        let attendee = mail_to(&mails, &format!("friend-{path}@test.com")).await;
+        // One email to the attendee: the move, not "you've been added" too.
+        let to_attendee = settled_mails_to(&mails, &format!("friend-{path}@test.com")).await;
+        assert_eq!(to_attendee.len(), 1, "emails to the attendee");
+        let attendee = &to_attendee[0];
         assert!(attendee.contains("has moved to a new time"), "{attendee}");
         assert!(!attendee.contains("added as an attendee"), "{attendee}");
         assert!(attendee.contains("METHOD:REQUEST"), "{attendee}");

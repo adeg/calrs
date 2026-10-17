@@ -679,6 +679,20 @@ async fn mail_to(mails: &std::sync::Mutex<Vec<CapturedMail>>, email: &str) -> St
     }
 }
 
+/// Every email to `email` once the background sends have finished, decoded.
+/// Unlike `mail_to`, which returns at the first one, this sees a second
+/// email that a test must rule out.
+async fn settled_mails_to(mails: &std::sync::Mutex<Vec<CapturedMail>>, email: &str) -> Vec<String> {
+    drain_emails(std::time::Duration::from_secs(10)).await;
+    mails
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| m.rcpt.iter().any(|r| r.contains(email)))
+        .map(|m| decode_quoted_printable(&m.data))
+        .collect()
+}
+
 async fn insert_pending_french_booking(pool: &SqlitePool, et_id: &str, uid: &str) -> String {
     let booking_id = uuid::Uuid::new_v4().to_string();
     sqlx::query("INSERT INTO bookings (id, event_type_id, uid, guest_name, guest_email, guest_timezone, start_at, end_at, status, cancel_token, reschedule_token, confirm_token, language) VALUES (?, ?, ?, 'Guest', 'guest@test.com', 'UTC', '2026-06-15T10:00:00', '2026-06-15T10:30:00', 'pending', ?, ?, ?, 'fr')")
