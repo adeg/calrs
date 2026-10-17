@@ -33,6 +33,17 @@ slots-location-google-meet = Google Meet
 
 slots-tz-label = Jouw tijdzone
 slots-time-format-label = Tijdnotatie
+tz-group-common = Veelgebruikte tijdzones
+tz-region-africa = Afrika
+tz-region-america = Amerika
+tz-region-antarctica = Antarctica
+tz-region-arctic = Arctis
+tz-region-asia = Azië
+tz-region-atlantic = Atlantische Oceaan
+tz-region-australia = Australië
+tz-region-europe = Europa
+tz-region-indian = Indische Oceaan
+tz-region-pacific = Stille Oceaan
 
 slots-view-month = Maandweergave
 slots-view-week = Weekweergave

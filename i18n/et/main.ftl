@@ -33,6 +33,17 @@ slots-location-google-meet = Google Meet
 
 slots-tz-label = Sinu ajavöönd
 slots-time-format-label = Ajavorming
+tz-group-common = Levinud ajavööndid
+tz-region-africa = Aafrika
+tz-region-america = Ameerika
+tz-region-antarctica = Antarktis
+tz-region-arctic = Arktika
+tz-region-asia = Aasia
+tz-region-atlantic = Atlandi ookean
+tz-region-australia = Austraalia
+tz-region-europe = Euroopa
+tz-region-indian = India ookean
+tz-region-pacific = Vaikne ookean
 
 slots-view-month = Kuuvaade
 slots-view-week = Nädalavaade

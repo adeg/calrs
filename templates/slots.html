@@ -777,8 +777,12 @@
       <div class="slots-info-setting">
         <label for="tz-select" class="slots-info-setting-label">&#127760; {{ t("slots-tz-label") }}</label>
         <select id="tz-select">
-          {% for tz in tz_options %}
-            <option value="{{ tz.value }}" {% if tz.selected %}selected{% endif %}>{{ tz.label }}</option>
+          {% for group in tz_options %}
+            <optgroup label="{{ group.label }}">
+            {% for tz in group.options %}
+              <option value="{{ tz.value }}"{% if tz.selected %} selected{% endif %}>{{ tz.label }}</option>
+            {% endfor %}
+            </optgroup>
           {% endfor %}
         </select>
       </div>

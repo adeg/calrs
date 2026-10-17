@@ -434,6 +434,32 @@ async fn public_slots_page_returns_200() {
     );
 }
 
+/// #265: the guest picker offers every zone, whatever the guest's own one,
+/// and selects the guest's exactly once.
+#[tokio::test]
+async fn slots_page_offers_every_timezone_and_selects_the_guest_one() {
+    let (app, _, _, _) = setup_test_app().await;
+    let response = app
+        .clone()
+        .oneshot(get("/u/testuser/test-meeting?tz=Europe%2FBucharest"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = body_string(response).await;
+    assert_eq!(selected_options(&body, "tz-select"), ["Europe/Bucharest"]);
+    assert_eq!(body.matches(r#"value="Europe&#x2f;Bucharest""#).count(), 1);
+    assert!(body.contains(r#"<optgroup label="Common timezones">"#));
+
+    // A guest elsewhere can still pick Bucharest.
+    let response = app
+        .oneshot(get("/u/testuser/test-meeting?tz=UTC"))
+        .await
+        .unwrap();
+    let body = body_string(response).await;
+    assert_eq!(selected_options(&body, "tz-select"), ["UTC"]);
+    assert!(body.contains(r#"value="Europe&#x2f;Bucharest""#));
+}
+
 #[tokio::test]
 async fn nonexistent_profile_returns_404_or_empty() {
     let (app, _, _, _) = setup_test_app().await;

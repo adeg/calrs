@@ -1228,6 +1228,24 @@ async fn seed_round_robin_reschedule(pool: &SqlitePool) -> (String, String, Naiv
     (alice, resched_tok, target)
 }
 
+/// #265: the reschedule slot picker offers every zone too.
+#[tokio::test]
+async fn guest_reschedule_picker_offers_every_timezone() {
+    let (app, pool, _, _) = setup_test_app().await;
+    let (_alice, resched_tok, _) = seed_round_robin_reschedule(&pool).await;
+    let response = app
+        .oneshot(get(&format!(
+            "/booking/reschedule/{}?tz=Europe%2FBucharest",
+            resched_tok
+        )))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = body_string(response).await;
+    assert_eq!(selected_options(&body, "tz-select"), ["Europe/Bucharest"]);
+    assert!(body.contains(r#"<optgroup label="Pacific Ocean">"#));
+}
+
 /// End-to-end guard for #166: the slot grid a guest is offered when
 /// rescheduling a round-robin team booking must come from the assigned
 /// member's calendar. Before the fix it came from the event type owner's,

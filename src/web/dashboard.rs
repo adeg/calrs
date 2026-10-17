@@ -671,12 +671,7 @@ fn settings_render(
         Ok(t) => t,
         Err(e) => return internal_error_html("internal", &e),
     };
-    let tz_options: Vec<minijinja::Value> = common_timezones_with("")
-        .iter()
-        .map(|(iana, label)| {
-            context! { value => iana, label => label }
-        })
-        .collect();
+    let tz_options = timezone_options(values.timezone, lang);
     let lang_options: Vec<minijinja::Value> = crate::i18n::supported_with_labels()
         .map(|(code, label)| context! { value => code, label => label })
         .collect();

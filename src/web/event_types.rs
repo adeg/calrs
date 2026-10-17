@@ -626,10 +626,7 @@ pub(super) async fn new_event_type_form(
             form_reschedule_notice_unit => "minutes",
             form_booking_horizon_days => "",
             form_pending => PendingSettings::DEFAULT.context(),
-            tz_options => common_timezones_with(&user.timezone)
-                .iter()
-                .map(|(iana, label)| context! { value => iana, label => label })
-                .collect::<Vec<_>>(),
+            tz_options => timezone_options(&user.timezone, auth_user.lang),
             error => "",
         })
         .unwrap_or_else(|e| internal_error_body("template render", &e)),
@@ -1274,10 +1271,7 @@ pub(super) async fn edit_event_type_form(
             form_reschedule_notice_unit => form_reschedule_notice_unit,
             form_booking_horizon_days => form_booking_horizon_days,
             form_pending => form_pending,
-            tz_options => common_timezones_with(&form_timezone)
-                .iter()
-                .map(|(iana, label)| context! { value => iana, label => label })
-                .collect::<Vec<_>>(),
+            tz_options => timezone_options(&form_timezone, auth_user.lang),
             is_group => team_id.is_some(),
             is_round_robin_group => is_round_robin_group,
             is_collective_team => is_collective_team,
@@ -1849,10 +1843,7 @@ async fn render_event_type_form_error(
             form_pending => PendingSettings::from_form(form)
                 .unwrap_or(PendingSettings::DEFAULT)
                 .context(),
-            tz_options => common_timezones_with(form.timezone.as_deref().unwrap_or(&auth_user.user.timezone))
-                .iter()
-                .map(|(iana, label)| context! { value => iana, label => label })
-                .collect::<Vec<_>>(),
+            tz_options => timezone_options(form.timezone.as_deref().unwrap_or(&auth_user.user.timezone), auth_user.lang),
             error => error,
             sidebar => sidebar_context(auth_user, "event-types"),
             lang => auth_user.lang,
@@ -2150,10 +2141,7 @@ pub(super) async fn new_group_event_type_form(
             form_booking_horizon_days => "",
             form_pending => PendingSettings::DEFAULT.context(),
             form_timezone => &user.timezone,
-            tz_options => common_timezones_with(&user.timezone)
-                .iter()
-                .map(|(iana, label)| context! { value => iana, label => label })
-                .collect::<Vec<_>>(),
+            tz_options => timezone_options(&user.timezone, auth_user.lang),
             watcher_teams => watcher_teams_ctx,
             selected_watcher_team_ids => "",
             error => "",
@@ -2730,10 +2718,7 @@ pub(super) async fn edit_group_event_type_form(
             form_reschedule_notice_unit => form_reschedule_notice_unit,
             form_booking_horizon_days => form_booking_horizon_days,
             form_pending => form_pending,
-            tz_options => common_timezones_with(&form_timezone)
-                .iter()
-                .map(|(iana, label)| context! { value => iana, label => label })
-                .collect::<Vec<_>>(),
+            tz_options => timezone_options(&form_timezone, auth_user.lang),
             is_round_robin_group => is_round_robin_group,
             is_collective_team => is_collective_team,
             priority_members => members_ctx,

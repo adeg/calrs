@@ -1621,84 +1621,291 @@ fn server_tz() -> Tz {
     Tz::UTC
 }
 
-/// Common IANA timezones for the selector (most used ones).
-pub(super) fn common_timezones_with(guest_tz: &str) -> Vec<(String, String)> {
-    use chrono::Utc;
-    let now = Utc::now();
-    let entries: &[(&str, &str)] = &[
-        ("Pacific/Midway", "Midway"),
-        ("Pacific/Honolulu", "Hawaii"),
-        ("America/Anchorage", "Alaska"),
-        ("America/Los_Angeles", "Los Angeles"),
-        ("America/Denver", "Denver"),
-        ("America/Chicago", "Chicago"),
-        ("America/New_York", "New York"),
-        ("America/Sao_Paulo", "São Paulo"),
-        ("Atlantic/Cape_Verde", "Cape Verde"),
-        ("UTC", "UTC"),
-        ("Europe/London", "London"),
-        ("Europe/Paris", "Paris, Brussels"),
-        ("Europe/Helsinki", "Helsinki, Kyiv"),
-        ("Europe/Moscow", "Moscow"),
-        ("Asia/Dubai", "Dubai"),
-        ("Asia/Kolkata", "India"),
-        ("Asia/Bangkok", "Bangkok"),
-        ("Asia/Shanghai", "Shanghai"),
-        ("Asia/Tokyo", "Tokyo"),
-        ("Australia/Sydney", "Sydney"),
-        ("Pacific/Auckland", "Auckland"),
-    ];
+/// Common IANA timezones, shown first in every timezone picker with a
+/// friendly label.
+const COMMON_TIMEZONES: &[(&str, &str)] = &[
+    ("Pacific/Midway", "Midway"),
+    ("Pacific/Honolulu", "Hawaii"),
+    ("America/Anchorage", "Alaska"),
+    ("America/Los_Angeles", "Los Angeles"),
+    ("America/Denver", "Denver"),
+    ("America/Chicago", "Chicago"),
+    ("America/New_York", "New York"),
+    ("America/Sao_Paulo", "São Paulo"),
+    ("Atlantic/Cape_Verde", "Cape Verde"),
+    ("UTC", "UTC"),
+    ("Europe/London", "London"),
+    ("Europe/Paris", "Paris, Brussels"),
+    ("Europe/Helsinki", "Helsinki, Kyiv"),
+    ("Europe/Moscow", "Moscow"),
+    ("Asia/Dubai", "Dubai"),
+    ("Asia/Kolkata", "India"),
+    ("Asia/Bangkok", "Bangkok"),
+    ("Asia/Shanghai", "Shanghai"),
+    ("Asia/Tokyo", "Tokyo"),
+    ("Australia/Sydney", "Sydney"),
+    ("Pacific/Auckland", "Auckland"),
+];
 
-    let format_label = |iana: &str, city: &str| -> String {
-        if iana == "UTC" {
-            "UTC".to_string()
-        } else if let Ok(tz) = iana.parse::<chrono_tz::Tz>() {
-            let offset = now.with_timezone(&tz).offset().fix().local_minus_utc();
-            let h = offset / 3600;
-            let m = (offset.abs() % 3600) / 60;
-            let offset_str = if m != 0 {
-                format!("UTC{:+}:{:02}", h, m)
-            } else {
-                format!("UTC{:+}", h)
-            };
-            format!("{} ({})", city, offset_str)
-        } else {
-            format!("{} ({})", city, iana)
-        }
-    };
+/// IANA areas listed in the full picker, one `<optgroup>` each. Ids outside
+/// them (`US/Eastern`, `Etc/GMT+3`, `EST5EDT`) are legacy aliases.
+const TIMEZONE_AREAS: &[&str] = &[
+    "Africa",
+    "America",
+    "Antarctica",
+    "Arctic",
+    "Asia",
+    "Atlantic",
+    "Australia",
+    "Europe",
+    "Indian",
+    "Pacific",
+];
 
-    let mut result: Vec<(String, String)> = entries
+/// Old names for a location that has a current one in the same list, taken
+/// from the renamed, duplicate and alternate-name sections of tzdb's
+/// `backward` file. Merged zones that are still real places (Amsterdam,
+/// Oslo, Accra) stay listed.
+const LEGACY_TIMEZONE_NAMES: &[&str] = &[
+    "Africa/Asmera",
+    "Africa/Timbuktu",
+    "America/Argentina/ComodRivadavia",
+    "America/Atka",
+    "America/Buenos_Aires",
+    "America/Catamarca",
+    "America/Coral_Harbour",
+    "America/Cordoba",
+    "America/Ensenada",
+    "America/Fort_Wayne",
+    "America/Godthab",
+    "America/Indianapolis",
+    "America/Jujuy",
+    "America/Knox_IN",
+    "America/Louisville",
+    "America/Mendoza",
+    "America/Montreal",
+    "America/Nipigon",
+    "America/Pangnirtung",
+    "America/Porto_Acre",
+    "America/Rainy_River",
+    "America/Rosario",
+    "America/Santa_Isabel",
+    "America/Shiprock",
+    "America/Thunder_Bay",
+    "America/Virgin",
+    "America/Yellowknife",
+    "Antarctica/South_Pole",
+    "Asia/Ashkhabad",
+    "Asia/Calcutta",
+    "Asia/Chongqing",
+    "Asia/Chungking",
+    "Asia/Dacca",
+    "Asia/Harbin",
+    "Asia/Istanbul",
+    "Asia/Kashgar",
+    "Asia/Katmandu",
+    "Asia/Macao",
+    "Asia/Rangoon",
+    "Asia/Saigon",
+    "Asia/Tel_Aviv",
+    "Asia/Thimbu",
+    "Asia/Ujung_Pandang",
+    "Asia/Ulan_Bator",
+    "Atlantic/Faeroe",
+    "Atlantic/Jan_Mayen",
+    "Australia/ACT",
+    "Australia/Currie",
+    "Australia/LHI",
+    "Australia/NSW",
+    "Australia/North",
+    "Australia/Queensland",
+    "Australia/South",
+    "Australia/Tasmania",
+    "Australia/Victoria",
+    "Australia/West",
+    "Australia/Yancowinna",
+    "Europe/Belfast",
+    "Europe/Kiev",
+    "Europe/Tiraspol",
+    "Europe/Uzhgorod",
+    "Europe/Zaporozhye",
+    "Pacific/Enderbury",
+    "Pacific/Johnston",
+    "Pacific/Ponape",
+    "Pacific/Samoa",
+    "Pacific/Truk",
+    "Pacific/Yap",
+];
+
+/// One `<option>` of a timezone picker.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct TzOption {
+    pub value: String,
+    pub label: String,
+    pub selected: bool,
+}
+
+/// One `<optgroup>` of a timezone picker: the common zones (`area: None`),
+/// then one group per IANA area.
+#[derive(Debug, Clone)]
+pub(super) struct TzGroup {
+    pub area: Option<&'static str>,
+    pub options: Vec<TzOption>,
+}
+
+/// Today's UTC offset of a zone, as shown next to its name: "UTC+3",
+/// "UTC+5:30", "UTC-3".
+pub(super) fn utc_offset_label(tz: Tz, now: chrono::DateTime<chrono::Utc>) -> String {
+    let offset = now.with_timezone(&tz).offset().fix().local_minus_utc();
+    let sign = if offset < 0 { '-' } else { '+' };
+    let h = offset.abs() / 3600;
+    let m = (offset.abs() % 3600) / 60;
+    if m != 0 {
+        format!("UTC{}{}:{:02}", sign, h, m)
+    } else {
+        format!("UTC{}{}", sign, h)
+    }
+}
+
+/// Readable name of a zone inside its area: `Europe/Bucharest` reads
+/// "Bucharest", `America/Argentina/Buenos_Aires` reads "Buenos Aires,
+/// Argentina", so the city comes first and native type-ahead finds it.
+pub(super) fn timezone_location_label(name: &str) -> String {
+    let mut parts: Vec<String> = name
+        .split('/')
+        .skip(1)
+        .map(|p| p.replace('_', " "))
+        .collect();
+    parts.reverse();
+    parts.join(", ")
+}
+
+/// Every timezone for a picker: the common zones first, then every IANA
+/// zone grouped by area and sorted by name, each labelled with today's UTC
+/// offset. A common zone is not repeated in its area, so whatever is
+/// selected appears exactly once. `selected` is always offered, even a
+/// legacy alias the full list leaves out (`US/Eastern`, `Asia/Calcutta`),
+/// so a saved value is never swapped for the first option on the next save.
+pub(super) fn timezone_groups(selected: &str, now: chrono::DateTime<chrono::Utc>) -> Vec<TzGroup> {
+    let is_common = |name: &str| COMMON_TIMEZONES.iter().any(|(iana, _)| *iana == name);
+    let mut common: Vec<TzOption> = COMMON_TIMEZONES
         .iter()
-        .map(|(iana, city)| {
-            let label = format_label(iana, city);
-            (iana.to_string(), label)
+        .map(|(iana, city)| TzOption {
+            value: iana.to_string(),
+            label: match iana.parse::<Tz>() {
+                Ok(tz) if *iana != "UTC" => format!("{} ({})", city, utc_offset_label(tz, now)),
+                _ => city.to_string(),
+            },
+            selected: *iana == selected,
         })
         .collect();
+    let mut groups: Vec<TzGroup> = TIMEZONE_AREAS
+        .iter()
+        .map(|area| TzGroup {
+            area: Some(area),
+            options: Vec::new(),
+        })
+        .collect();
+    let mut found = selected.is_empty() || is_common(selected);
 
-    // If guest timezone is not in the common list, insert it sorted by UTC offset
-    if !guest_tz.is_empty() && !entries.iter().any(|(iana, _)| *iana == guest_tz) {
-        if let Ok(tz) = guest_tz.parse::<chrono_tz::Tz>() {
-            let guest_offset = now.with_timezone(&tz).offset().fix().local_minus_utc();
-            let label = format_label(guest_tz, guest_tz);
-            // Find insertion point by UTC offset
-            let pos = result
-                .iter()
-                .position(|(iana, _)| {
-                    if *iana == "UTC" {
-                        guest_offset < 0
-                    } else if let Ok(t) = iana.parse::<chrono_tz::Tz>() {
-                        let o = now.with_timezone(&t).offset().fix().local_minus_utc();
-                        o > guest_offset
-                    } else {
-                        false
-                    }
-                })
-                .unwrap_or(result.len());
-            result.insert(pos, (guest_tz.to_string(), label));
+    for tz in chrono_tz::TZ_VARIANTS.iter() {
+        let name = tz.name();
+        let is_selected = name == selected;
+        if is_common(name) || (LEGACY_TIMEZONE_NAMES.contains(&name) && !is_selected) {
+            continue;
+        }
+        let Some((area, _)) = name.split_once('/') else {
+            continue;
+        };
+        if let Some(group) = groups.iter_mut().find(|g| g.area == Some(area)) {
+            group.options.push(TzOption {
+                value: name.to_string(),
+                label: format!(
+                    "{} ({})",
+                    timezone_location_label(name),
+                    utc_offset_label(*tz, now)
+                ),
+                selected: is_selected,
+            });
+            found |= is_selected;
         }
     }
+    for group in &mut groups {
+        group
+            .options
+            .sort_by_cached_key(|o| (o.label.to_lowercase(), o.value.clone()));
+    }
 
+    // A selected id outside the areas (`US/Eastern`, `Etc/GMT+3`) joins the
+    // common zones, at its place by UTC offset. One chrono-tz cannot parse
+    // is kept as it is, so saving the form does not replace it either.
+    if !found {
+        let offset_of = |tz: Tz| now.with_timezone(&tz).offset().fix().local_minus_utc();
+        let parsed = selected.parse::<Tz>().ok();
+        let label = match parsed {
+            Some(tz) => format!("{} ({})", selected, utc_offset_label(tz, now)),
+            None => selected.to_string(),
+        };
+        let pos = parsed
+            .and_then(|tz| {
+                common.iter().position(|o| {
+                    o.value
+                        .parse::<Tz>()
+                        .is_ok_and(|t| offset_of(t) > offset_of(tz))
+                })
+            })
+            .unwrap_or(common.len());
+        common.insert(
+            pos,
+            TzOption {
+                value: selected.to_string(),
+                label,
+                selected: true,
+            },
+        );
+    }
+
+    let mut result = vec![TzGroup {
+        area: None,
+        options: common,
+    }];
+    result.extend(groups.into_iter().filter(|g| !g.options.is_empty()));
     result
+}
+
+/// Heading of a timezone `<optgroup>` in the page language.
+fn timezone_group_label(lang: &str, area: Option<&str>) -> String {
+    match area {
+        None => crate::i18n::translate(lang, "tz-group-common", None),
+        Some("Africa") => crate::i18n::translate(lang, "tz-region-africa", None),
+        Some("America") => crate::i18n::translate(lang, "tz-region-america", None),
+        Some("Antarctica") => crate::i18n::translate(lang, "tz-region-antarctica", None),
+        Some("Arctic") => crate::i18n::translate(lang, "tz-region-arctic", None),
+        Some("Asia") => crate::i18n::translate(lang, "tz-region-asia", None),
+        Some("Atlantic") => crate::i18n::translate(lang, "tz-region-atlantic", None),
+        Some("Australia") => crate::i18n::translate(lang, "tz-region-australia", None),
+        Some("Europe") => crate::i18n::translate(lang, "tz-region-europe", None),
+        Some("Indian") => crate::i18n::translate(lang, "tz-region-indian", None),
+        Some("Pacific") => crate::i18n::translate(lang, "tz-region-pacific", None),
+        Some(other) => other.to_string(),
+    }
+}
+
+/// Template context for a timezone `<select>`: one entry per `<optgroup>`,
+/// each with a translated `label` and its `options` (`value`, `label`,
+/// `selected`). Used by every timezone picker (#265).
+pub(super) fn timezone_options(selected: &str, lang: &str) -> Vec<minijinja::Value> {
+    timezone_groups(selected, chrono::Utc::now())
+        .into_iter()
+        .map(|g| {
+            let options: Vec<minijinja::Value> = g
+                .options
+                .iter()
+                .map(|o| context! { value => o.value, label => o.label, selected => o.selected })
+                .collect();
+            context! { label => timezone_group_label(lang, g.area), options => options }
+        })
+        .collect()
 }
 
 // --- Troubleshoot ---

@@ -320,6 +320,28 @@ async fn delete_override_removes_from_db() {
 
 // --- Dashboard pages: new event type form ---
 
+/// #265: the event type form offers every zone and preselects the host's,
+/// even one outside the common list.
+#[tokio::test]
+async fn new_event_type_form_preselects_a_timezone_outside_the_common_list() {
+    let (app, pool, session, _) = setup_test_app().await;
+    sqlx::query("UPDATE users SET timezone = 'Europe/Bucharest' WHERE email = 'test@example.com'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let response = app
+        .oneshot(get_authed("/dashboard/event-types/new", &session))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = body_string(response).await;
+    assert_eq!(
+        selected_options(&body, "event_type_timezone"),
+        ["Europe/Bucharest"]
+    );
+    assert!(body.contains(r#"value="Asia&#x2f;Tokyo""#));
+}
+
 #[tokio::test]
 async fn new_event_type_form_returns_200() {
     let (app, _, session, _) = setup_test_app().await;
