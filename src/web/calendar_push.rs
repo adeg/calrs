@@ -838,8 +838,10 @@ pub(super) async fn booking_resource_label(pool: &SqlitePool, booking_uid: &str)
 /// stored before the mode was switched off is not shown). Paths that rebuild
 /// `BookingDetails` from the row (approval, reschedule, claim, reminders) use
 /// this so the host emails and the calendar event carry what the booking
-/// form's own emails did (#261).
-pub(super) async fn booking_guest_input(
+/// form's own emails did (#261). The write-back retry, the Meet path and the
+/// pending sweep read them here too rather than from their own row queries,
+/// whose copies had already drifted (#266).
+pub(crate) async fn booking_guest_input(
     pool: &SqlitePool,
     booking_uid: &str,
 ) -> (Option<String>, Option<String>) {
@@ -864,8 +866,9 @@ pub(super) async fn booking_guest_input(
 
 /// The additional attendees the guest invited, for paths that rebuild
 /// `BookingDetails` from the row: without them an approved or rescheduled
-/// booking's calendar event lists only the guest.
-pub(super) async fn booking_additional_attendees(
+/// booking's calendar event lists only the guest. One order for every push,
+/// so a rewrite never reorders the ATTENDEE lines.
+pub(crate) async fn booking_additional_attendees(
     pool: &SqlitePool,
     booking_uid: &str,
 ) -> Vec<String> {

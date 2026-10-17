@@ -416,34 +416,16 @@ async fn send_due_reminders(pool: SqlitePool, secret_key: [u8; 32]) {
             notified = true;
         }
 
-        // Reminder SMS to the guest. Queried per booking rather than
-        // joined into `due` above: sqlx only derives FromRow for tuples up
-        // to 16 elements, and that one is already at the limit.
+        // Reminder SMS to the guest. `details.guest_phone` is already the
+        // number `booking_guest_input` keeps only when the event type
+        // collects one, so it needs no second lookup (#266).
         if sms_configured {
-            let sms_target: Option<(Option<String>, String)> = sqlx::query_as(
-                "SELECT b.guest_phone, et.sms_phone_mode FROM bookings b
-                 JOIN event_types et ON et.id = b.event_type_id WHERE b.id = ?",
-            )
-            .bind(bid)
-            .fetch_optional(&pool)
-            .await
-            .unwrap_or(None);
-
-            if let Some((phone, phone_mode)) = sms_target {
-                if let Some(ctx) = crate::sms::SmsContext::for_booking(
-                    &details,
-                    phone.as_deref(),
-                    crate::sms::collects_phone(&phone_mode),
-                ) {
-                    crate::sms::notify_guest(
-                        &pool,
-                        &secret_key,
-                        crate::sms::SmsEvent::Reminder,
-                        ctx,
-                    )
+            if let Some(ctx) =
+                crate::sms::SmsContext::for_booking(&details, details.guest_phone.as_deref(), true)
+            {
+                crate::sms::notify_guest(&pool, &secret_key, crate::sms::SmsEvent::Reminder, ctx)
                     .await;
-                    notified = true;
-                }
+                notified = true;
             }
         }
 

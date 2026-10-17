@@ -2885,21 +2885,15 @@ pub(super) async fn claim_booking(
         guest_phone: guest_phone_shown,
         location,
         reminder_minutes: None,
-        additional_attendees: vec![claimant_email.clone()],
+        // Read like every other push, so the ATTENDEE lines keep the order
+        // the next rewrite will give them (#266). The claimant was inserted
+        // above and is normally listed already.
+        additional_attendees: booking_additional_attendees(&state.pool, &uid).await,
         host_timezone: claim_host_tz.name().to_string(),
         ..Default::default()
     };
-
-    // Also include any pre-existing additional attendees
-    let existing_attendees: Vec<(String,)> =
-        sqlx::query_as("SELECT email FROM booking_attendees WHERE booking_id = ? AND email != ?")
-            .bind(&booking_id)
-            .bind(&claimant_email)
-            .fetch_all(&state.pool)
-            .await
-            .unwrap_or_default();
-    for (email,) in &existing_attendees {
-        details.additional_attendees.push(email.clone());
+    if !details.additional_attendees.contains(&claimant_email) {
+        details.additional_attendees.push(claimant_email.clone());
     }
 
     // Re-push updated ICS to host's CalDAV (with claimant as ATTENDEE)

@@ -234,23 +234,21 @@ pub(super) async fn writeback_details(
         String,
         String,
         String,
-        String,
         Option<String>,
         Option<String>,
         Option<String>,
         String,
-        Option<String>,
         Option<i32>,
         Option<String>,
         Option<String>,
         Option<String>,
         String,
     )> = sqlx::query_as(
-        "SELECT b.id, b.guest_name, b.guest_email, COALESCE(NULLIF(b.guest_timezone, ''), 'UTC'), \
+        "SELECT b.guest_name, b.guest_email, COALESCE(NULLIF(b.guest_timezone, ''), 'UTC'), \
                 CASE b.time_version WHEN 1 THEN b.start_at ELSE rtrim(b.start_at, 'Z') END, \
                 CASE b.time_version WHEN 1 THEN b.end_at ELSE rtrim(b.end_at, 'Z') END, \
                 u.name, COALESCE(u.booking_email, u.email), \
-                COALESCE(NULLIF(b.meeting_url, ''), et.location_value), et.id, b.notes, \
+                COALESCE(NULLIF(b.meeting_url, ''), et.location_value), et.id, \
                 et.reminder_minutes, b.language, u.language, a.user_id, et.title \
          FROM bookings b \
          JOIN event_types et ON et.id = b.event_type_id \
@@ -263,7 +261,6 @@ pub(super) async fn writeback_details(
     .await
     .unwrap_or(None);
     let (
-        booking_id,
         guest_name,
         guest_email,
         guest_timezone,
@@ -273,7 +270,6 @@ pub(super) async fn writeback_details(
         host_email,
         location,
         et_id,
-        notes,
         reminder_minutes,
         guest_language,
         host_language,
@@ -285,12 +281,11 @@ pub(super) async fn writeback_details(
     let guest_tz = guest_timezone.parse::<Tz>().unwrap_or(Tz::UTC);
     let (date, start_time, end_time) =
         super::booking_strings_in_guest_tz(&start_at, &end_at, stored_tz, guest_tz);
-    let additional_attendees: Vec<String> =
-        sqlx::query_scalar("SELECT email FROM booking_attendees WHERE booking_id = ?")
-            .bind(&booking_id)
-            .fetch_all(pool)
-            .await
-            .unwrap_or_default();
+    // The same guest input every other push carries: without the phone, a
+    // booking whose first push failed reached the host's calendar without
+    // it once a retry landed (#266).
+    let (notes, guest_phone) = super::booking_guest_input(pool, booking_uid).await;
+    let additional_attendees = super::booking_additional_attendees(pool, booking_uid).await;
 
     // The organizer the event was created with: the stored snapshot for a
     // multi-host booking (#161), the assigned member or owner otherwise. The
@@ -319,6 +314,7 @@ pub(super) async fn writeback_details(
         host_email,
         uid: booking_uid.to_string(),
         notes,
+        guest_phone,
         location: location.filter(|l| !l.is_empty()),
         reminder_minutes,
         additional_attendees,
