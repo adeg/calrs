@@ -1600,8 +1600,8 @@ async fn cancelling_a_confirmed_booking_cancels_the_attendees_copy() {
 }
 
 /// #267: a request never confirmed sent its attendees nothing, so ending it
-/// sends them nothing either, and its decline carries no CANCEL for the
-/// guest, who holds no invite.
+/// sends them nothing either, and its decline or the guest's own
+/// cancellation carries no CANCEL for the guest, who holds no invite.
 #[tokio::test]
 async fn ending_a_never_confirmed_request_tells_its_attendees_nothing() {
     let _env = crate::test_support::ENV_LOCK.lock().await;
@@ -1645,9 +1645,14 @@ async fn ending_a_never_confirmed_request_tells_its_attendees_nothing() {
 
         let guest = settled_mails_to(&mails, &format!("g-new-{path}@test.com")).await;
         assert_eq!(guest.len(), 1, "{path}: emails to the guest");
-        if path != "cancel" {
-            assert!(!guest[0].contains("text/calendar"), "{path}: {}", guest[0]);
-        }
+        // No CANCEL and no note about one, whoever ends it: the guest holds
+        // no invite either.
+        assert!(!guest[0].contains("text/calendar"), "{path}: {}", guest[0]);
+        assert!(
+            !guest[0].contains("A calendar cancellation is attached"),
+            "{path}: {}",
+            guest[0]
+        );
         let attendee = settled_mails_to(&mails, &format!("a-new-{path}@test.com")).await;
         assert!(attendee.is_empty(), "{path}: {attendee:?}");
     }

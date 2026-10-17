@@ -497,7 +497,6 @@ pub async fn send_guest_cancellation(
     config: &SmtpConfig,
     details: &CancellationDetails,
 ) -> Result<()> {
-    let ics = generate_cancel_ics(details);
     let lang = lang_or_en(details.guest_language.as_deref());
 
     let to = named_mailbox(&details.guest_name, &details.guest_email)?;
@@ -530,8 +529,9 @@ pub async fn send_guest_cancellation(
     let label_time = t(lang, "confirmed-detail-time");
     let label_with = t(lang, "confirmed-detail-with");
     let label_reason = t(lang, "common-detail-reason");
-    let ics_attached_plain = t(lang, "email-cancel-ics-attached-plain");
-    let ics_attached_html = t(lang, "email-cancel-ics-attached-html");
+    // A guest cancelling a request never confirmed holds no invite, so is
+    // sent no CANCEL and no note about one (#267).
+    let note = withdrawn_invite_note(lang, details);
     let signature = t(lang, "email-signature");
 
     let reason_text = details
@@ -548,7 +548,7 @@ pub async fn send_guest_cancellation(
          {} {}\n\
          {} {}\n\n\
          {}\
-         {}\n\n\
+         {}\
          {}",
         greeting,
         headline,
@@ -561,7 +561,9 @@ pub async fn send_guest_cancellation(
         label_with,
         details.host_name,
         reason_text,
-        ics_attached_plain,
+        note.as_ref()
+            .map(|(plain, _)| format!("{plain}\n\n"))
+            .unwrap_or_default(),
         signature,
     );
 
@@ -596,15 +598,8 @@ pub async fn send_guest_cancellation(
         &headline,
         "#dc2626",
         &rows,
-        Some(&ics_attached_html),
+        note.as_ref().map(|(_, html)| html.as_str()),
         &[],
-    );
-
-    let body = build_multipart_body(&plain, &html);
-
-    let ics_attachment = Attachment::new("cancel.ics".to_string()).body(
-        ics,
-        ContentType::parse("text/calendar; method=CANCEL; charset=UTF-8")?,
     );
 
     let subject = ta(
@@ -612,17 +607,18 @@ pub async fn send_guest_cancellation(
         "email-cancel-subject",
         [("event", &details.event_title), ("date", &details.date)],
     );
-    let email = config
-        .message_from(Sender::host_of_cancellation(details))?
-        .to(to)
-        .subject(subject)
-        .multipart(
-            MultiPart::mixed()
-                .multipart(body)
-                .singlepart(ics_attachment),
-        )?;
-
-    send_email(config, email).await
+    send_composed(
+        config,
+        Sender::host_of_cancellation(details),
+        to,
+        ComposedEmail {
+            subject,
+            plain,
+            html,
+        },
+        withdrawn_invite(details),
+    )
+    .await
 }
 
 /// "A booking you attend has been cancelled", with a CANCEL for the invite
@@ -895,10 +891,11 @@ pub async fn send_guest_decline_notice(
     .await
 }
 
-/// The CANCEL a decline or an expiry carries when the guest holds the
-/// invite: the request was a reschedule of a confirmed booking, whose
-/// calendar copy still shows the confirmed time, and the booking is now
-/// over (#267). A new request sent no invite, so it carries none.
+/// The CANCEL a guest's cancellation, decline or expiry email carries when
+/// the guest holds the invite, i.e. the booking was confirmed at least
+/// once; for a decline or an expiry, the request was then a reschedule
+/// whose calendar copy still shows the confirmed time (#267). A request
+/// never confirmed sent no invite, so its emails carry none.
 fn withdrawn_invite(details: &CancellationDetails) -> Option<(&'static str, String, &'static str)> {
     details
         .invite_sent
