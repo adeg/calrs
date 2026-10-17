@@ -1439,6 +1439,7 @@ email-pick-new-time-subject = Verschiebung: { $event }, bitte wähle einen neuen
 email-pick-new-time-message = { $host } muss deine Buchung verschieben. Bitte wähle einen neuen Termin.
 email-pick-new-time-link = Neuen Termin wählen: { $url }
 email-rescheduled-message = Deine Buchung wurde von { $host } verschoben.
+email-reschedule-approved-message = { $host } hat den neuen Termin deiner Buchung bestätigt.
 email-rescheduled-ics-attached-plain = Eine aktualisierte Kalendereinladung ist beigefügt.
 email-rescheduled-ics-attached-html = Eine aktualisierte Kalendereinladung ist dieser E-Mail beigefügt.
 email-need-to-reschedule = Verschieben? { $url }

@@ -1439,6 +1439,7 @@ email-pick-new-time-subject = Reagendamento: { $event }, escolha um novo horári
 email-pick-new-time-message = { $host } precisa reagendar o seu agendamento. Escolha um novo horário, por favor.
 email-pick-new-time-link = Escolher um novo horário: { $url }
 email-rescheduled-message = Seu agendamento foi reagendado por { $host }.
+email-reschedule-approved-message = { $host } confirmou o novo horário do seu agendamento.
 email-rescheduled-ics-attached-plain = Um convite de calendário atualizado está anexado.
 email-rescheduled-ics-attached-html = Um convite de calendário atualizado está anexado a este e-mail.
 email-need-to-reschedule = Precisa reagendar? { $url }

@@ -1463,6 +1463,7 @@ email-pick-new-time-subject = Zmiana terminu: { $event }, wybierz nowy termin
 email-pick-new-time-message = { $host } musi zmienić termin Twojej rezerwacji. Wybierz nowy termin.
 email-pick-new-time-link = Wybierz nowy termin: { $url }
 email-rescheduled-message = { $host } zmienił(a) termin Twojej rezerwacji.
+email-reschedule-approved-message = { $host } potwierdził(a) nowy termin Twojej rezerwacji.
 email-rescheduled-ics-attached-plain = Zaktualizowane zaproszenie do kalendarza w załączniku.
 email-rescheduled-ics-attached-html = Zaktualizowane zaproszenie do kalendarza w załączniku tego e-maila.
 email-need-to-reschedule = Chcesz zmienić termin? { $url }

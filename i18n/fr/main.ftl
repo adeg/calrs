@@ -1439,6 +1439,7 @@ email-pick-new-time-subject = Reprogrammation : { $event }, merci de choisir un 
 email-pick-new-time-message = { $host } doit reprogrammer votre réservation. Merci de choisir un nouveau créneau.
 email-pick-new-time-link = Choisir un nouveau créneau : { $url }
 email-rescheduled-message = Votre réservation a été reprogrammée par { $host }.
+email-reschedule-approved-message = { $host } a confirmé le nouvel horaire de votre réservation.
 email-rescheduled-ics-attached-plain = Une invitation mise à jour est jointe.
 email-rescheduled-ics-attached-html = Une invitation mise à jour est jointe à cet e-mail.
 email-need-to-reschedule = Besoin de reprogrammer ? { $url }

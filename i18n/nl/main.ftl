@@ -1440,6 +1440,7 @@ email-pick-new-time-subject = Verzetten: { $event }, kies een nieuw tijdstip
 email-pick-new-time-message = { $host } moet je boeking verzetten. Kies een nieuw tijdstip.
 email-pick-new-time-link = Kies een nieuw tijdstip: { $url }
 email-rescheduled-message = Je boeking is verzet door { $host }.
+email-reschedule-approved-message = { $host } heeft het nieuwe tijdstip van je boeking bevestigd.
 email-rescheduled-ics-attached-plain = Er is een bijgewerkte agenda-uitnodiging bijgevoegd.
 email-rescheduled-ics-attached-html = Er is een bijgewerkte agenda-uitnodiging bij deze e-mail gevoegd.
 email-need-to-reschedule = Wil je verzetten? { $url }

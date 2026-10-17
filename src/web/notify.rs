@@ -140,6 +140,63 @@ pub async fn drain_emails(timeout: std::time::Duration) {
     }
 }
 
+/// The guest-side emails of an approval, shared by the token and dashboard
+/// paths. A new request gets the confirmation and its attendees "you've
+/// been added". A reschedule of a booking confirmed before
+/// (`reschedule_approval`, see `was_confirmed_before`) gets "your new time
+/// is confirmed" with the moved invite, matching the "moved" SMS, and its
+/// attendees the moved invite (#266, #267). `notice_min` is the event
+/// type's (cancel, reschedule) notice window.
+pub(super) async fn send_approval_guest_emails(
+    smtp_config: &crate::email::SmtpConfig,
+    details: &crate::email::BookingDetails,
+    cancel_url: Option<&str>,
+    reschedule_url: Option<&str>,
+    notice_min: (Option<i32>, Option<i32>),
+    reschedule_approval: bool,
+) {
+    let (cancel_notice_min, reschedule_notice_min) = notice_min;
+    if reschedule_approval {
+        log_email_result(
+            crate::email::send_guest_reschedule_approved(
+                smtp_config,
+                details,
+                cancel_url,
+                reschedule_url,
+                cancel_notice_min,
+                reschedule_notice_min,
+            )
+            .await,
+            "guest_reschedule_approved",
+            &details.uid,
+        );
+        log_email_result(
+            crate::email::send_guest_attendee_reschedule(smtp_config, details, None).await,
+            "attendee_reschedule",
+            &details.uid,
+        );
+    } else {
+        log_email_result(
+            crate::email::send_guest_confirmation_ex(
+                smtp_config,
+                details,
+                cancel_url,
+                reschedule_url,
+                cancel_notice_min,
+                reschedule_notice_min,
+            )
+            .await,
+            "guest_confirmation",
+            &details.uid,
+        );
+        log_email_result(
+            crate::email::send_guest_attendee_confirmations(smtp_config, details).await,
+            "attendee_confirmation",
+            &details.uid,
+        );
+    }
+}
+
 /// Everything the new-booking emails need, owned so it can outlive the
 /// request. Shared by the four guest booking handlers (personal, user-scoped,
 /// dynamic group, team), which used to repeat the same send sequence inline.

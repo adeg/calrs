@@ -1273,3 +1273,135 @@ pub(super) fn compose_guest_reschedule_notification(
     }
     .compose()
 }
+
+/// Tell the guest the host approved the new time of their reschedule, in the
+/// language they booked in, with the moved invite (#267). Replaces the
+/// "booking confirmed" email at that approval, so the email says what the
+/// SMS says: the booking moved, it is not a new one. The invite is built
+/// from the full booking, attendees and notes included, like the
+/// confirmation invite it replaces.
+pub async fn send_guest_reschedule_approved(
+    config: &SmtpConfig,
+    details: &BookingDetails,
+    cancel_url: Option<&str>,
+    reschedule_url: Option<&str>,
+    cancel_notice_min: Option<i32>,
+    reschedule_notice_min: Option<i32>,
+) -> Result<()> {
+    let to = named_mailbox(&details.guest_name, &details.guest_email)?;
+    let mail = compose_guest_reschedule_approved(
+        details,
+        cancel_url,
+        reschedule_url,
+        cancel_notice_min,
+        reschedule_notice_min,
+    );
+    send_composed(
+        config,
+        Sender::host_of(details),
+        to,
+        mail,
+        Some(("invite.ics", generate_ics(details, "REQUEST"), "REQUEST")),
+    )
+    .await
+}
+
+pub(super) fn compose_guest_reschedule_approved(
+    details: &BookingDetails,
+    cancel_url: Option<&str>,
+    reschedule_url: Option<&str>,
+    cancel_notice_min: Option<i32>,
+    reschedule_notice_min: Option<i32>,
+) -> ComposedEmail {
+    let lang = guest_lang(details);
+    let time_display = format!(
+        "{} \u{2013} {} ({})",
+        details.start_time, details.end_time, details.guest_timezone
+    );
+    let mut rows = vec![
+        row(t(lang, "confirmed-detail-event"), &details.event_title),
+        row(t(lang, "email-detail-new-date"), &details.date),
+        row(t(lang, "email-detail-new-time"), time_display),
+        row(t(lang, "confirmed-detail-with"), &details.host_name),
+    ];
+    push_row(
+        &mut rows,
+        lang,
+        "confirmed-detail-location",
+        details.location.as_ref(),
+    );
+    push_row(
+        &mut rows,
+        lang,
+        "confirmed-detail-notes",
+        details.notes.as_ref(),
+    );
+
+    // The same notice-window lines the confirmation shows.
+    let notice = |key: &str, minutes: Option<i32>| {
+        minutes
+            .filter(|m| *m > 0)
+            .map(|m| ta(lang, key, [("minutes", m.to_string().as_str())]))
+    };
+    let notice_lines: Vec<String> = [
+        notice("email-confirm-reschedule-notice", reschedule_notice_min),
+        notice("email-confirm-cancel-notice", cancel_notice_min),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let mut plain_lines = Vec::new();
+    let mut actions = Vec::new();
+    if let Some(u) = reschedule_url {
+        plain_lines.push(ta(lang, "email-need-to-reschedule", [("url", u)]));
+        actions.push(EmailAction {
+            label: t(lang, "email-action-reschedule"),
+            url: u.to_string(),
+            color: "#3b82f6".to_string(),
+        });
+    }
+    if let Some(u) = cancel_url {
+        plain_lines.push(ta(lang, "email-confirm-need-to-cancel", [("url", u)]));
+        actions.push(EmailAction {
+            label: t(lang, "email-action-cancel-booking"),
+            url: u.to_string(),
+            color: "#dc2626".to_string(),
+        });
+    }
+    let mut footer_plain = t(lang, "email-rescheduled-ics-attached-plain");
+    let mut footer_html = t(lang, "email-rescheduled-ics-attached-html");
+    for line in &notice_lines {
+        footer_plain.push('\n');
+        footer_plain.push_str(line);
+        footer_html.push('\n');
+        footer_html.push_str(line);
+    }
+
+    EmailParts {
+        lang,
+        // Neutral subject: Exchange uses it as the appointment title (#157).
+        subject: ta(
+            lang,
+            "email-confirm-subject",
+            [("event", &details.event_title), ("date", &details.date)],
+        ),
+        heading: ta(
+            lang,
+            "email-confirm-greeting",
+            [("name", &details.guest_name)],
+        ),
+        message: ta(
+            lang,
+            "email-reschedule-approved-message",
+            [("host", &details.host_name)],
+        ),
+        accent: "#16a34a",
+        rows,
+        plain_lines,
+        footer_plain: Some(footer_plain),
+        footer_html: Some(footer_html),
+        actions,
+    }
+    .compose()
+}

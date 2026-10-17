@@ -303,6 +303,17 @@ async fn approving_a_reschedule_moves_the_attendees_copy() {
             "{guest}"
         );
         assert!(guest.contains("SEQUENCE:1"), "{guest}");
+        // The guest is told the new time is confirmed, as the SMS says it
+        // moved, not that a booking was confirmed (#267).
+        assert!(
+            guest.contains("Test User has confirmed the new time of your booking."),
+            "{guest}"
+        );
+        assert!(
+            !guest.contains("Your booking has been confirmed!"),
+            "{guest}"
+        );
+        assert!(guest.contains("METHOD:REQUEST"), "{guest}");
         // One email to the attendee: the move, not "you've been added" too.
         let to_attendee = settled_mails_to(&mails, &format!("friend-{path}@test.com")).await;
         assert_eq!(to_attendee.len(), 1, "emails to the attendee");

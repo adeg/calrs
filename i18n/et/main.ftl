@@ -1439,6 +1439,7 @@ email-pick-new-time-subject = Aja muutmine: { $event }, vali palun uus aeg
 email-pick-new-time-message = { $host } peab sinu broneeringu aega muutma. Vali palun uus aeg.
 email-pick-new-time-link = Vali uus aeg: { $url }
 email-rescheduled-message = { $host } muutis sinu broneeringu aega.
+email-reschedule-approved-message = { $host } kinnitas sinu broneeringu uue aja.
 email-rescheduled-ics-attached-plain = Uuendatud kalendrikutse on manuses.
 email-rescheduled-ics-attached-html = Uuendatud kalendrikutse on selle kirja manuses.
 email-need-to-reschedule = Kas soovid aega muuta? { $url }

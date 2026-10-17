@@ -430,35 +430,15 @@ pub(super) async fn approve_booking_by_token(
             fetch_event_type_notice_minutes(&state.pool, &event_type_id).await;
         let details = details.clone();
         spawn_emails(async move {
-            log_email_result(
-                crate::email::send_guest_confirmation_ex(
-                    &smtp_config,
-                    &details,
-                    guest_cancel_url.as_deref(),
-                    guest_reschedule_url.as_deref(),
-                    cancel_notice_min,
-                    reschedule_notice_min,
-                )
-                .await,
-                "guest_confirmation",
-                &details.uid,
-            );
-            // The attendees heard about the booking when it was first
-            // confirmed; an approved reschedule moves their copy (#267).
-            if reschedule_approval {
-                log_email_result(
-                    crate::email::send_guest_attendee_reschedule(&smtp_config, &details, None)
-                        .await,
-                    "attendee_reschedule",
-                    &details.uid,
-                );
-            } else {
-                log_email_result(
-                    crate::email::send_guest_attendee_confirmations(&smtp_config, &details).await,
-                    "attendee_confirmation",
-                    &details.uid,
-                );
-            }
+            send_approval_guest_emails(
+                &smtp_config,
+                &details,
+                guest_cancel_url.as_deref(),
+                guest_reschedule_url.as_deref(),
+                (cancel_notice_min, reschedule_notice_min),
+                reschedule_approval,
+            )
+            .await;
 
             // Also send host a confirmation email (no ICS, event pushed via CalDAV)
             log_email_result(
