@@ -44,6 +44,8 @@ tz-region-australia = Australien
 tz-region-europe = Europa
 tz-region-indian = Indischer Ozean
 tz-region-pacific = Pazifik
+slots-offset-note-day = Die Zeiten am %1 sind in %2 (Zeitumstellung am %3).
+slots-offset-note-range = Zeitumstellung am %1: ab dann sind die Zeiten in %2.
 
 slots-view-month = Monatsansicht
 slots-view-week = Wochenansicht

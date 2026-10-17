@@ -44,6 +44,8 @@ tz-region-australia = Australië
 tz-region-europe = Europa
 tz-region-indian = Indische Oceaan
 tz-region-pacific = Stille Oceaan
+slots-offset-note-day = Tijden op %1 zijn in %2 (de klok wordt verzet op %3).
+slots-offset-note-range = De klok wordt verzet op %1: vanaf dan zijn de tijden in %2.
 
 slots-view-month = Maandweergave
 slots-view-week = Weekweergave

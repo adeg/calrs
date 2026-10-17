@@ -329,6 +329,20 @@
     transform: scale(0.97);
   }
   /* Slot pill dot removed — pills are visually distinct enough */
+  /* Shown when the day's UTC offset differs from the one in the picker */
+  .slot-offset-note {
+    margin-bottom: 0.6rem;
+    padding: 0.45rem 0.6rem;
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius);
+    background: var(--accent-subtle);
+    color: var(--text);
+    font-size: 0.78rem;
+    line-height: 1.35;
+  }
+  .slot-offset-note[hidden] {
+    display: none;
+  }
   .slot-empty {
     text-align: center;
     padding: 1.5rem 1rem;
@@ -815,6 +829,7 @@
     "nextMonth": "{% if next_month is defined and next_month %}{{ next_month }}{% endif %}",
     "defaultCalendarView": "{{ default_calendar_view | default(value='month') }}",
     "deferredLoad": {% if deferred_load is defined and deferred_load %}true{% else %}false{% endif %},
+    "lang": {{ (lang | default('en')) | tojson }},
     "i18n": {
       "selectDate": {{ t("slots-select-date") | tojson }},
       "noTimesMonth": {{ t("slots-no-times-month") | tojson }},
@@ -822,6 +837,8 @@
       "clickHighlighted": {{ t("slots-click-highlighted") | tojson }},
       "noAvailabilityParticipants": {{ t("slots-no-availability-participants") | tojson }},
       "weekMore": {{ t("slots-week-more") | tojson }},
+      "offsetNoteDay": {{ t("slots-offset-note-day") | tojson }},
+      "offsetNoteRange": {{ t("slots-offset-note-range") | tojson }},
       "weekdays": [
         {{ t("slots-weekday-sun") | tojson }},
         {{ t("slots-weekday-mon") | tojson }},
@@ -902,6 +919,7 @@
         <div class="slot-panel-header">
           <div class="slot-panel-title" id="slot-panel-title">{{ t("slots-select-date") }}</div>
         </div>
+        <div class="slot-offset-note" id="slot-offset-note" hidden></div>
         <div class="slot-list" id="slot-list">
           {% if deferred_load is defined and deferred_load %}
           <div class="slot-empty" id="deferred-loader" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.75rem; padding: 3rem 1rem;">
@@ -962,6 +980,112 @@
 
   function formatTime(t) {
     return format === '12' ? calrsFormat12h(t) : t;
+  }
+
+  // UTC offset note (#265). The picker labels each zone with today's
+  // offset, so on a day past a clock change the label is an hour off. These
+  // helpers find that case and say so above the times. Offsets are read in
+  // en-US, whose shortOffset reads "GMT+2", and shown as "UTC+2" like the
+  // picker. A browser without shortOffset support shows no note.
+  var pageLang = calData.lang || 'en';
+  var offsetFmt = null;
+  try {
+    offsetFmt = new Intl.DateTimeFormat('en-US', { timeZone: guestTz || 'UTC', timeZoneName: 'shortOffset' });
+  } catch (e) { offsetFmt = null; }
+
+  function offsetAt(ms) {
+    var parts = offsetFmt.formatToParts(new Date(ms));
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i].type === 'timeZoneName') return parts[i].value.replace('GMT', 'UTC');
+    }
+    return '';
+  }
+
+  function offsetMinutes(label) {
+    var m = /([+-])(\d+)(?::(\d+))?/.exec(label);
+    if (!m) return 0;
+    var v = parseInt(m[2], 10) * 60 + (m[3] ? parseInt(m[3], 10) : 0);
+    return m[1] === '-' ? -v : v;
+  }
+
+  function utcNoon(ds) {
+    var p = ds.split('-');
+    return Date.UTC(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10), 12);
+  }
+
+  // Offset in force at local noon on a YYYY-MM-DD day of the guest's zone.
+  function dayOffset(ds) {
+    var noon = utcNoon(ds);
+    return offsetAt(noon - offsetMinutes(offsetAt(noon)) * 60000);
+  }
+
+  function shiftDay(ds, n) {
+    return new Date(utcNoon(ds) + n * 86400000).toISOString().slice(0, 10);
+  }
+
+  // A clock-change day in the page language ("25 October", "25 octobre").
+  function changeLabel(c) {
+    var opts = { day: 'numeric', month: 'long', timeZone: 'UTC' };
+    if (c.change.slice(0, 4) !== todayDate.slice(0, 4)) opts.year = 'numeric';
+    try { return new Intl.DateTimeFormat(pageLang, opts).format(new Date(utcNoon(c.change))); }
+    catch (e) { return c.change; }
+  }
+
+  // For the first of `dates` whose offset differs from the one in force
+  // now, returns that day, its offset and the day the clocks changed (the
+  // first day of the run of days with that offset). Null when none differs.
+  function offsetChange(dates) {
+    if (!offsetFmt) return null;
+    var now = offsetAt(Date.now());
+    for (var i = 0; i < dates.length; i++) {
+      var ds = dates[i];
+      if (ds < todayDate) continue;
+      var off = dayOffset(ds);
+      if (off === now) continue;
+      var change = ds;
+      for (var n = 0; n < 400 && change > todayDate; n++) {
+        var prev = shiftDay(change, -1);
+        if (dayOffset(prev) !== off) break;
+        change = prev;
+      }
+      return { date: ds, offset: off, change: change };
+    }
+    return null;
+  }
+
+  // Note for one selected day (month view). The day reads like the panel
+  // title just above it ("Mon 26").
+  function dayOffsetNote(ds) {
+    var c = offsetChange([ds]);
+    if (!c || !i18n.offsetNoteDay) return '';
+    var weekday = dayLabels[new Date(utcNoon(ds)).getUTCDay()];
+    return i18n.offsetNoteDay
+      .replace('%1', weekday + ' ' + parseInt(ds.slice(8), 10))
+      .replace('%2', c.offset)
+      .replace('%3', changeLabel(c));
+  }
+
+  // Note for a range of days (week and column views), from its first day
+  // with times that is past a change.
+  function rangeOffsetNote(dates) {
+    var c = offsetChange(dates);
+    if (!c || !i18n.offsetNoteRange) return '';
+    return i18n.offsetNoteRange.replace('%1', changeLabel(c)).replace('%2', c.offset);
+  }
+
+  function prependOffsetNote(container, text) {
+    if (!text) return;
+    var note = document.createElement('div');
+    note.className = 'slot-offset-note';
+    note.textContent = text;
+    container.insertBefore(note, container.firstChild);
+  }
+
+  function showDayOffsetNote(text) {
+    var el = document.getElementById('slot-offset-note');
+    if (!el) return;
+    el.textContent = text;
+    el.hidden = !text;
   }
 
   // Time format toggle
@@ -1106,6 +1230,7 @@
   function clearSlotPanel() {
     var titleEl = document.getElementById('slot-panel-title');
     if (titleEl) titleEl.textContent = i18n.selectDate || 'Select a date';
+    showDayOffsetNote('');
     var listEl = document.getElementById('slot-list');
     if (listEl) listEl.innerHTML = '<div class="slot-empty"><div class="slot-empty-icon">&#128197;</div><div>' + (i18n.noTimesMonth || 'No available times this month') + '</div></div>';
   }
@@ -1129,9 +1254,11 @@
     var slots = slotData[dateStr];
 
     if (!slots || slots.length === 0) {
+      showDayOffsetNote('');
       listEl.innerHTML = '<div class="slot-empty"><div class="slot-empty-icon">&#128347;</div><div>' + (i18n.noTimesDay || 'No available times this day') + '</div></div>';
       return;
     }
+    showDayOffsetNote(dayOffsetNote(dateStr));
 
     var html = '';
     for (var i = 0; i < slots.length; i++) {
@@ -1397,6 +1524,9 @@
     }
     html += '</div>';
     weekViewEl.innerHTML = html;
+    prependOffsetNote(weekViewEl, rangeOffsetNote(dates.filter(function(d) {
+      return (slotData[d.dateStr] || []).length > 0;
+    }).map(function(d) { return d.dateStr; })));
 
     // Wire "+N more" expand buttons
     weekViewEl.querySelectorAll('[data-week-expand]').forEach(function(btn) {
@@ -1558,6 +1688,7 @@
       html += '</div>';
     }
     columnViewEl.innerHTML = html;
+    prependOffsetNote(columnViewEl, rangeOffsetNote(dates.map(function(d) { return d.dateStr; })));
   }
 
   // Update shared nav for month/column views (month-level prev/next)

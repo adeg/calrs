@@ -44,6 +44,8 @@ tz-region-australia = Austraalia
 tz-region-europe = Euroopa
 tz-region-indian = India ookean
 tz-region-pacific = Vaikne ookean
+slots-offset-note-day = Kellaajad päeval %1 on %2 järgi (kellad keeratakse %3).
+slots-offset-note-range = Kellad keeratakse %1: sellest alates on kellaajad %2 järgi.
 
 slots-view-month = Kuuvaade
 slots-view-week = Nädalavaade

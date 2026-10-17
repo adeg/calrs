@@ -1244,6 +1244,7 @@ async fn guest_reschedule_picker_offers_every_timezone() {
     let body = body_string(response).await;
     assert_eq!(selected_options(&body, "tz-select"), ["Europe/Bucharest"]);
     assert!(body.contains(r#"<optgroup label="Pacific Ocean">"#));
+    assert!(body.contains(r#"id="slot-offset-note" hidden"#));
 }
 
 /// End-to-end guard for #166: the slot grid a guest is offered when

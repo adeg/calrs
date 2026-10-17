@@ -435,7 +435,8 @@ async fn public_slots_page_returns_200() {
 }
 
 /// #265: the guest picker offers every zone, whatever the guest's own one,
-/// and selects the guest's exactly once.
+/// and selects the guest's exactly once. The page also carries what the
+/// clock-change note needs.
 #[tokio::test]
 async fn slots_page_offers_every_timezone_and_selects_the_guest_one() {
     let (app, _, _, _) = setup_test_app().await;
@@ -449,6 +450,12 @@ async fn slots_page_offers_every_timezone_and_selects_the_guest_one() {
     assert_eq!(selected_options(&body, "tz-select"), ["Europe/Bucharest"]);
     assert_eq!(body.matches(r#"value="Europe&#x2f;Bucharest""#).count(), 1);
     assert!(body.contains(r#"<optgroup label="Common timezones">"#));
+    assert!(body.contains(r#"id="slot-offset-note" hidden"#));
+    assert!(body.contains(r#""lang": "en""#));
+    assert!(body.contains(r#""offsetNoteDay": "Times on %1 are %2 (clocks change on %3).""#));
+    assert!(
+        body.contains(r#""offsetNoteRange": "Clocks change on %1: from then on, times are %2.""#)
+    );
 
     // A guest elsewhere can still pick Bucharest.
     let response = app
