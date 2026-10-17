@@ -209,8 +209,11 @@ pub(super) async fn approve_booking_by_token(
             .ok()
             .flatten()
             .flatten();
-    // Read before the status flip below, which stamps it.
-    let attendees_notified = was_confirmed_before(&state.pool, &bid).await;
+    // Read before the status flip below, which stamps it. A booking that was
+    // confirmed before is a guest reschedule awaiting approval: its guest is
+    // texted "moved", not "confirmed", and its attendees were already told
+    // about the booking (#266, #267).
+    let reschedule_approval = was_confirmed_before(&state.pool, &bid).await;
 
     // Refresh the hosts' calendars before taking the lock below (bounded,
     // see `prepare_approval_hosts`).
@@ -439,7 +442,7 @@ pub(super) async fn approve_booking_by_token(
                 "guest_confirmation",
                 &details.uid,
             );
-            if !attendees_notified {
+            if !reschedule_approval {
                 log_email_result(
                     crate::email::send_guest_attendee_confirmations(&smtp_config, &details).await,
                     "attendee_confirmation",
@@ -458,7 +461,7 @@ pub(super) async fn approve_booking_by_token(
 
     // Confirmation SMS to the guest, now that the booking is confirmed. This
     // is the deferred half of the booking flow: a pending booking stays silent
-    // until the host approves it here.
+    // until the host approves it here. An approved reschedule says "moved".
     if let Some(ctx) = crate::sms::SmsContext::for_booking(
         &details,
         guest_phone.as_deref(),
@@ -467,7 +470,11 @@ pub(super) async fn approve_booking_by_token(
         crate::sms::notify_guest(
             &state.pool,
             &state.secret_key,
-            crate::sms::SmsEvent::Confirmed,
+            if reschedule_approval {
+                crate::sms::SmsEvent::Rescheduled
+            } else {
+                crate::sms::SmsEvent::Confirmed
+            },
             ctx,
         )
         .await;

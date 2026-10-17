@@ -1188,3 +1188,74 @@ async fn guest_cancel_emails_in_the_booking_language() {
     assert!(guest.contains("<html lang=\"fr\">"), "{guest}");
     assert!(!guest.contains("Hi Guest"), "{guest}");
 }
+
+/// #267: approving a guest reschedule of a booking that was confirmed
+/// before texted the guest "Booking confirmed". Both approval paths now
+/// text "Booking moved" for a reschedule, and still "Booking confirmed" for
+/// a new request.
+#[tokio::test]
+async fn approving_a_reschedule_texts_moved_not_confirmed() {
+    let _env = crate::test_support::ENV_LOCK.lock().await;
+    let (app, pool, session, et_id) = setup_test_app().await;
+    let (sms_port, received) = spawn_sms_webhook().await;
+    use_sms_webhook(&pool, sms_port).await;
+    sqlx::query("UPDATE event_types SET sms_phone_mode = 'optional' WHERE id = ?")
+        .bind(&et_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut day = 3;
+    for via_dashboard in [false, true] {
+        for rescheduled in [false, true] {
+            day += 1;
+            // Confirmed first (the insert trigger stamps it) and sent back to
+            // pending, as a guest reschedule does; or a new pending request.
+            let id = insert_v1_booking(
+                &pool,
+                &et_id,
+                &format!("sms-{day}@test.com"),
+                Utc::now() + Duration::days(day),
+                30,
+                if rescheduled { "confirmed" } else { "pending" },
+                &[("guest_phone", Some("+33612345678".to_string()))],
+            )
+            .await;
+            sqlx::query("UPDATE bookings SET status = 'pending' WHERE id = ?")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let response = if via_dashboard {
+                let csrf = "csrf-267-sms";
+                app.clone()
+                    .oneshot(post_form(
+                        &format!("/dashboard/bookings/{}/confirm", id),
+                        &session,
+                        csrf,
+                        &format!("_csrf={}", csrf),
+                    ))
+                    .await
+                    .unwrap()
+            } else {
+                app.clone()
+                    .oneshot(post_bare(&format!("/booking/approve/confirm-{id}")))
+                    .await
+                    .unwrap()
+            };
+            assert!(response.status().is_success() || response.status().is_redirection());
+
+            // The SMS is sent inline, before the response.
+            let last = received.lock().unwrap().pop().expect("no SMS sent");
+            let expected = if rescheduled {
+                "Booking moved"
+            } else {
+                "Booking confirmed"
+            };
+            assert!(
+                last.contains(expected),
+                "dashboard={via_dashboard} rescheduled={rescheduled}: {last}"
+            );
+        }
+    }
+}
