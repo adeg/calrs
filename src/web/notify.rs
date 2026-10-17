@@ -212,6 +212,11 @@ pub(super) fn send_new_booking_emails(m: NewBookingEmails) {
                 "guest_confirmation",
                 uid,
             );
+            log_email_result(
+                crate::email::send_guest_attendee_confirmations(&m.smtp_config, &m.details).await,
+                "attendee_confirmation",
+                uid,
+            );
             for (name, email, language) in &m.host_recipients {
                 log_email_result(
                     crate::email::send_host_notification(

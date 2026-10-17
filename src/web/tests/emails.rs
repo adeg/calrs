@@ -200,6 +200,134 @@ async fn approval_keeps_the_additional_attendees() {
     mail_to(&mails, "friend@test.com").await;
 }
 
+/// A booking confirmed at submit tells its additional attendees there and
+/// then, and remembers it was confirmed (#266).
+#[tokio::test]
+async fn a_confirmed_booking_emails_its_attendees_at_submit() {
+    let _env = crate::test_support::ENV_LOCK.lock().await;
+    let (app, pool, _, et_id) = setup_test_app().await;
+    let (port, mails) = spawn_capturing_mta().await;
+    use_capturing_mta(&pool, port).await;
+    sqlx::query("UPDATE event_types SET max_additional_guests = 3 WHERE id = ?")
+        .bind(&et_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let csrf = "csrf-266-submit";
+    let form = format!(
+        "_csrf={}&date={}&time=10%3A00&name=Guest&email=submit%40test.com&notes=&additional_guests=friend%40test.com",
+        csrf,
+        far_future_monday()
+    );
+    let response = app
+        .oneshot(post_form_unauthed(
+            "/u/testuser/test-meeting/book",
+            csrf,
+            &form,
+        ))
+        .await
+        .unwrap();
+    assert!(response.status() == 200 || response.status().is_redirection());
+
+    let attendee = mail_to(&mails, "friend@test.com").await;
+    assert!(attendee.contains("METHOD:REQUEST"), "{attendee}");
+    let stamped: bool = sqlx::query_scalar(
+        "SELECT first_confirmed_at IS NOT NULL FROM bookings WHERE guest_email = 'submit@test.com'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(stamped);
+}
+
+/// #266: both approval paths now carry the attendees, so approving a guest
+/// reschedule of a booking they had already been told about sent them the
+/// "you've been added" email again. A reschedule that needs no approval
+/// sends them nothing, and neither does its approval.
+#[tokio::test]
+async fn approving_a_reschedule_does_not_email_the_attendees_again() {
+    let _env = crate::test_support::ENV_LOCK.lock().await;
+    let (app, pool, session, et_id) = setup_test_app().await;
+    let (port, mails) = spawn_capturing_mta().await;
+    use_capturing_mta(&pool, port).await;
+    for (path, via_dashboard) in [("token", false), ("dashboard", true)] {
+        // Confirmed first (the insert trigger stamps it), then sent back to
+        // pending by a guest reschedule, as `guest_reschedule_booking` does.
+        let id = insert_v1_booking(
+            &pool,
+            &et_id,
+            &format!("{path}@test.com"),
+            Utc::now() + Duration::days(if via_dashboard { 3 } else { 4 }),
+            30,
+            "confirmed",
+            &[],
+        )
+        .await;
+        sqlx::query("INSERT INTO booking_attendees (id, booking_id, email) VALUES (?, ?, ?)")
+            .bind(format!("att-266-{path}"))
+            .bind(&id)
+            .bind(format!("friend-{path}@test.com"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE bookings SET status = 'pending' WHERE id = ?")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let response = if via_dashboard {
+            let csrf = "csrf-266-dash";
+            app.clone()
+                .oneshot(post_form(
+                    &format!("/dashboard/bookings/{}/confirm", id),
+                    &session,
+                    csrf,
+                    &format!("_csrf={}", csrf),
+                ))
+                .await
+                .unwrap()
+        } else {
+            app.clone()
+                .oneshot(post_bare(&format!("/booking/approve/confirm-{id}")))
+                .await
+                .unwrap()
+        };
+        assert!(response.status().is_success() || response.status().is_redirection());
+
+        // The guest's confirmation goes out, then the attendees' would, then
+        // the host's: once the host's has arrived, none went to the attendee.
+        let guest = mail_to(&mails, &format!("{path}@test.com")).await;
+        assert!(
+            guest.contains(&format!("mailto:friend-{path}@test.com")),
+            "{guest}"
+        );
+        let host_mails = || {
+            mails
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.rcpt.iter().any(|r| r.contains("test@example.com")))
+                .count()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let expected = if via_dashboard { 2 } else { 1 };
+        while host_mails() < expected && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(host_mails(), expected);
+        assert!(
+            !mails
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m.rcpt.iter().any(|r| r.contains(&format!("friend-{path}")))),
+            "the attendee was emailed again on the {path} approval"
+        );
+    }
+}
+
 /// #266: a guest reschedule that needs approval rebuilt the emails with no
 /// notes, so the host's request for the new time lost the phone and the
 /// notes the original request showed, and the guest's pending notice lost

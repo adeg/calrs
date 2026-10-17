@@ -253,6 +253,23 @@ pub(super) async fn pending_host_recipients(
     out
 }
 
+/// Whether a pending booking was confirmed once already, i.e. this request is
+/// a guest reschedule awaiting approval rather than a new booking. Read
+/// before the approval flips the status, which stamps `first_confirmed_at`.
+/// Its additional attendees were emailed when it was first confirmed, so
+/// approving the new time does not email them again (#266).
+pub(super) async fn was_confirmed_before(pool: &SqlitePool, booking_id: &str) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT first_confirmed_at IS NOT NULL FROM bookings WHERE id = ?",
+    )
+    .bind(booking_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(false)
+}
+
 /// Public booking page of an event type, for the "pick another time" link in
 /// the expiry email. Only for enabled public event types: internal and
 /// private ones need a per-guest invite the guest no longer has. A public

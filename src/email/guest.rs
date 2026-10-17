@@ -204,9 +204,19 @@ pub async fn send_guest_confirmation_ex(
                 .singlepart(ics_attachment),
         )?;
 
-    send_email(config, email).await?;
+    send_email(config, email).await
+}
 
-    // Send confirmation to additional attendees
+/// "You've been added as an attendee", with the invite attached, to each of
+/// the booking's additional attendees. Sent once, when the booking first
+/// becomes confirmed: at submit, or at the approval of a new request. Not on
+/// the approval of a reschedule, which tells them no more than a reschedule
+/// that needs no approval does (#266). Kept apart from the guest's own
+/// confirmation, which every approval sends.
+pub async fn send_guest_attendee_confirmations(
+    config: &SmtpConfig,
+    details: &BookingDetails,
+) -> Result<()> {
     for attendee_email in &details.additional_attendees {
         let to2: Mailbox = attendee_email.parse()?;
         let ics2 = generate_ics(details, "REQUEST");
