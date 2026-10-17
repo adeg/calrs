@@ -1046,8 +1046,10 @@ pub(super) async fn cancel_from_status(
     // Each retry follows a real transition, and a booking only moves
     // between confirmed and pending this way, so a few attempts suffice.
     for _ in 0..3 {
+        // Ending a confirmed booking bumps its SEQUENCE, so the CANCEL
+        // outranks the copy its holders have (RFC 5546, migration 072).
         let changed = sqlx::query(
-            "UPDATE bookings SET status = 'cancelled', pending_expires_at = NULL, pending_since = NULL, pending_reminder_sent_at = NULL WHERE id = ? AND status = ?",
+            "UPDATE bookings SET status = 'cancelled', pending_expires_at = NULL, pending_since = NULL, pending_reminder_sent_at = NULL, ics_sequence = CASE status WHEN 'confirmed' THEN ics_sequence + 1 ELSE ics_sequence END WHERE id = ? AND status = ?",
         )
         .bind(booking_id)
         .bind(&expected)

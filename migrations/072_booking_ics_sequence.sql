@@ -7,4 +7,10 @@
 -- current value, so a moved booking updates the guest's and the
 -- attendees' copies in place and a later cancellation is not ignored as
 -- out of date.
+--
+-- Ending a confirmed booking (any cancellation, CLI and sync included)
+-- bumps it once more, so its CANCEL is above the copy every holder has, as
+-- RFC 5546 prefers. Ending a pending one does not: a pending booking that
+-- went out as an invite is a reschedule awaiting approval, whose bump the
+-- holders never received, so its CANCEL is already one above their copy.
 ALTER TABLE bookings ADD COLUMN ics_sequence INTEGER NOT NULL DEFAULT 0;

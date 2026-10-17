@@ -598,10 +598,11 @@ pub async fn run(pool: &SqlitePool, key: &[u8; 32], cmd: BookingCommands) -> Res
 
 /// Cancel a booking if it is still confirmed. `false` when it no longer is
 /// (cancelled, declined or sent back to pending since it was read), in
-/// which case nothing changed.
+/// which case nothing changed. Bumps the SEQUENCE so the CANCEL sent next
+/// outranks the copy its holders have (RFC 5546, migration 072).
 async fn cancel_if_confirmed(pool: &SqlitePool, booking_id: &str) -> Result<bool> {
     let updated = sqlx::query(
-        "UPDATE bookings SET status = 'cancelled' WHERE id = ? AND status = 'confirmed'",
+        "UPDATE bookings SET status = 'cancelled', ics_sequence = ics_sequence + 1 WHERE id = ? AND status = 'confirmed'",
     )
     .bind(booking_id)
     .execute(pool)
@@ -853,6 +854,13 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(statuses, ["pending", "cancelled"]);
+        // Only the cancelled one's SEQUENCE moved, once (RFC 5546).
+        let sequences: Vec<i64> =
+            sqlx::query_scalar("SELECT ics_sequence FROM bookings ORDER BY start_at")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(sequences, [0, 1]);
     }
 
     #[tokio::test]

@@ -798,9 +798,11 @@ async fn remove_orphaned_ews_events(
 /// Simplified booking-cancel for EWS orphan reconciliation: looks up a
 /// confirmed booking by UID and marks it cancelled. Skips the
 /// `cancel_orphaned_booking` HTTP confirm step (CalDAV-specific).
+/// It sends no CANCEL, but bumps the SEQUENCE like every cancellation, so
+/// none that a later path sends can fall behind a copy.
 async fn cancel_orphaned_booking_simple(pool: &SqlitePool, _key: &[u8; 32], uid: &str) {
     let _ = sqlx::query(
-        "UPDATE bookings SET status = 'cancelled' WHERE uid = ? AND status = 'confirmed'",
+        "UPDATE bookings SET status = 'cancelled', ics_sequence = ics_sequence + 1 WHERE uid = ? AND status = 'confirmed'",
     )
     .bind(uid)
     .execute(pool)
@@ -1165,9 +1167,10 @@ async fn cancel_orphaned_booking(
         }
     }
 
-    // Cancel the booking
+    // Cancel the booking. The SEQUENCE bump makes the CANCEL outrank the
+    // copy its holders have (RFC 5546, migration 072).
     let updated = sqlx::query(
-        "UPDATE bookings SET status = 'cancelled' WHERE id = ? AND status = 'confirmed'",
+        "UPDATE bookings SET status = 'cancelled', ics_sequence = ics_sequence + 1 WHERE id = ? AND status = 'confirmed'",
     )
     .bind(&booking_id)
     .execute(pool)

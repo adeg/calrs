@@ -175,7 +175,8 @@ Call sites use `crate::email::name` whatever file `name` lives in.
   invite through `with_invite_holders`, so its attendees, and the guest of a
   declined or expired reschedule, get a CANCEL only when an invite went out. A
   reschedule bumps `bookings.ics_sequence` (migration 072), the SEQUENCE
-  every invite, CANCEL and push carries. ICS text is folded once per
+  every invite, CANCEL and push carries; so does ending a confirmed booking,
+  so its CANCEL outranks the copy it ends. ICS text is folded once per
   generator by `fold_ics` (`src/email/render.rs`).
 - **Organizer snapshot** (`src/web/hosts.rs`, migration
   `070_booking_organizer.sql`). Multi-host bookings store the organizer they

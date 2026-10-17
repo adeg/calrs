@@ -1186,8 +1186,10 @@ pub(super) async fn cancel_booking(
 
     // Guarded on the status read above: a double click, or an approval or
     // cancellation landing in between, must not notify the guest twice or
-    // cancel a booking that changed state meanwhile.
-    let changed = sqlx::query("UPDATE bookings SET status = ?, pending_expires_at = NULL, pending_since = NULL, pending_reminder_sent_at = NULL WHERE id = ? AND status = ?")
+    // cancel a booking that changed state meanwhile. Ending a confirmed
+    // booking bumps its SEQUENCE, so the CANCEL outranks the copy its holders
+    // have (RFC 5546, migration 072).
+    let changed = sqlx::query("UPDATE bookings SET status = ?, pending_expires_at = NULL, pending_since = NULL, pending_reminder_sent_at = NULL, ics_sequence = CASE status WHEN 'confirmed' THEN ics_sequence + 1 ELSE ics_sequence END WHERE id = ? AND status = ?")
         .bind(new_status)
         .bind(&bid)
         .bind(&prev_status)

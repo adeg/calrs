@@ -1465,8 +1465,9 @@ async fn a_reschedule_moves_the_attendees_copy_once_confirmed() {
     }
 }
 
-/// #267: the CANCEL for a booking that was moved carries the SEQUENCE its
-/// last invite had; a lower one is ignored by clients as out of date.
+/// #267: the CANCEL for a booking that was moved carries a SEQUENCE above
+/// the one its last invite had; a lower one is ignored by clients as out of
+/// date, and RFC 5546 asks for a higher one.
 #[tokio::test]
 async fn cancelling_a_moved_booking_sends_its_sequence() {
     let _env = crate::test_support::ENV_LOCK.lock().await;
@@ -1507,7 +1508,15 @@ async fn cancelling_a_moved_booking_sends_its_sequence() {
 
     let guest = mail_to(&mails, "cancel-moved@test.com").await;
     assert!(guest.contains("METHOD:CANCEL"), "{guest}");
-    assert!(guest.contains("SEQUENCE:2"), "{guest}");
+    // One above the copy the guest holds (RFC 5546), and stored, so a
+    // later message about the booking cannot fall behind it.
+    assert!(guest.contains("SEQUENCE:3"), "{guest}");
+    let stored: i64 = sqlx::query_scalar("SELECT ics_sequence FROM bookings WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 3);
 }
 
 /// Add an additional attendee to a booking.
@@ -1523,7 +1532,7 @@ async fn add_attendee(pool: &SqlitePool, booking_id: &str, email: &str) {
 
 /// #267: the attendees of a confirmed booking were sent its moves but never
 /// its cancellation, so their copy outlived it. Each now gets one email
-/// with a CANCEL under the booking's UID and current SEQUENCE, whoever
+/// with a CANCEL under the booking's UID and the next SEQUENCE, whoever
 /// cancels, and never the reason, which one party wrote for the other.
 #[tokio::test]
 async fn cancelling_a_confirmed_booking_cancels_the_attendees_copy() {
@@ -1584,7 +1593,8 @@ async fn cancelling_a_confirmed_booking_cancels_the_attendees_copy() {
         );
         assert!(attendee.contains("METHOD:CANCEL"), "{attendee}");
         assert!(attendee.contains(&format!("UID:uid-{id}")), "{attendee}");
-        assert!(attendee.contains("SEQUENCE:2"), "{attendee}");
+        // One above the SEQUENCE:2 copy they hold (RFC 5546).
+        assert!(attendee.contains("SEQUENCE:3"), "{attendee}");
         assert!(
             attendee.contains(&start.format("%Y-%m-%d").to_string()),
             "a confirmed booking's cancellation shows the time they hold: {attendee}"
@@ -1723,6 +1733,8 @@ async fn declining_or_expiring_a_reschedule_withdraws_every_copy() {
         let guest = &guest[0];
         assert!(guest.contains("METHOD:CANCEL"), "{path}: {guest}");
         assert!(guest.contains(&format!("UID:uid-{id}")), "{path}: {guest}");
+        // Already above the SEQUENCE:0 copy they hold: the reschedule bumped
+        // it, so ending a pending booking does not bump it again.
         assert!(guest.contains("SEQUENCE:1"), "{path}: {guest}");
         assert!(
             guest.contains("A calendar cancellation is attached"),
