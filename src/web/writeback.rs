@@ -77,6 +77,20 @@ pub(super) async fn push_and_record(
 ) -> Vec<(String, String)> {
     let mut failures = Vec::new();
     for target in super::booking_write_targets(pool, booking_uid, user_id).await {
+        // The only host-language text in the event is the phone label, and
+        // each copy belongs to its target: every collective member reads it
+        // in their own language, and a caller that left `host_language`
+        // unset (a claim) no longer falls back to English (#266).
+        let localized;
+        let details = if details.guest_phone.is_some() {
+            localized = crate::email::BookingDetails {
+                host_language: crate::email::user_language(pool, &target).await,
+                ..details.clone()
+            };
+            &localized
+        } else {
+            details
+        };
         for msg in
             super::caldav_push_booking_for_user(pool, key, &target, booking_uid, details).await
         {

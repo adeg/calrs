@@ -269,6 +269,74 @@ async fn a_retried_writeback_keeps_the_guest_phone_and_notes() {
     assert!(event.contains("Bring the quote"), "{event}");
 }
 
+/// #266: a claim re-pushed the host's event with no `host_language`, so the
+/// phone label fell back to English, and listed the claimant before the
+/// attendees the guest invited, the reverse of every later push.
+#[tokio::test]
+async fn a_claim_keeps_the_host_language_and_the_attendee_order() {
+    let _env = crate::test_support::ENV_LOCK.lock().await;
+    let (app, pool, _, et_id) = setup_test_app().await;
+    let host: String = sqlx::query_scalar("SELECT id FROM users WHERE email = 'test@example.com'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    set_user_language(&pool, "test@example.com", "fr").await;
+    let (base, dav) = spawn_mock_dav(DavMode::Ok).await;
+    seed_write_source(&pool, &host, &base).await;
+    sqlx::query("UPDATE event_types SET sms_phone_mode = 'optional' WHERE id = ?")
+        .bind(&et_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let id = insert_v1_booking(
+        &pool,
+        &et_id,
+        "guest@test.com",
+        Utc::now() + Duration::days(10),
+        30,
+        "confirmed",
+        &[("guest_phone", Some("+33612345678".to_string()))],
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO booking_attendees (id, booking_id, email, created_at) \
+         VALUES ('att-266', ?, 'friend@test.com', '2026-01-01 00:00:00')",
+    )
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let watcher = insert_role_user(&pool, "watcher@test.com", "user").await;
+    sqlx::query(
+        "INSERT INTO booking_claim_tokens (id, booking_id, user_id, token, expires_at) \
+         VALUES ('bct-266', ?, ?, 'claim-tok-266', datetime('now', '+7 days'))",
+    )
+    .bind(&id)
+    .bind(&watcher)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let csrf = "test-csrf-266-claim";
+    let response = app
+        .oneshot(post_form_unauthed(
+            &format!("/booking/claim/{id}"),
+            csrf,
+            &format!("_csrf={csrf}&token=claim-tok-266"),
+        ))
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let event = dav.only_event();
+    assert!(event.contains("Téléphone : +33612345678"), "{event}");
+    let friend = event.find("mailto:friend@test.com").expect("friend listed");
+    let claimant = event
+        .find("mailto:watcher@test.com")
+        .expect("claimant listed");
+    assert!(friend < claimant, "{event}");
+}
+
 /// A booking cancelled (or declined) after its write-back failed is never
 /// pushed again: retrying would put a cancelled meeting on the calendar.
 #[tokio::test]
