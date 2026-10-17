@@ -170,7 +170,10 @@ Call sites use `crate::email::name` whatever file `name` lives in.
   `booking_ics_sequence` (`src/web/calendar_push.rs`), not their own
   queries. A trigger stamps `bookings.first_confirmed_at` (migration 071),
   so an approval can tell a rescheduled booking from a new request: it texts
-  "moved" and sends the attendees the moved invite instead of "added". A
+  and emails the guest "moved" and sends the attendees the moved invite
+  instead of "added". Every path that ends a booking reads who holds its
+  invite through `with_invite_holders`, so its attendees, and the guest of a
+  declined or expired reschedule, get a CANCEL only when an invite went out. A
   reschedule bumps `bookings.ics_sequence` (migration 072), the SEQUENCE
   every invite, CANCEL and push carries. ICS text is folded once per
   generator by `fold_ics` (`src/email/render.rs`).

@@ -1238,7 +1238,11 @@ pub(super) async fn cancel_booking(
         host_language: crate::email::supported_language(user.language.clone()),
         host_timezone: stored_tz.name().to_string(),
         sequence,
+        ..Default::default()
     };
+    // Who holds the invite: the attendees of a booking confirmed before,
+    // and the guest of a declined reschedule (#267).
+    let details = with_invite_holders(&state.pool, details, was_pending).await;
 
     // The guest's copy names the host the invite named, whoever clicked:
     // its CANCEL must carry the original ORGANIZER, or calendar clients
@@ -1261,6 +1265,11 @@ pub(super) async fn cancel_booking(
         let details = details.clone();
         let guest_details = guest_details.clone();
         spawn_emails(async move {
+            log_email_result(
+                crate::email::send_guest_attendee_cancellations(&smtp_config, &guest_details).await,
+                "attendee_cancellation",
+                &details.uid,
+            );
             if was_pending {
                 log_email_result(
                     crate::email::send_guest_decline_notice(&smtp_config, &guest_details).await,
@@ -1535,6 +1544,7 @@ pub(super) async fn confirm_booking(
         host_timezone: stored_tz.name().to_string(),
         resource_name: booking_resource_label(&state.pool, &uid).await,
         sequence: booking_ics_sequence(&state.pool, &uid).await,
+        attendee_languages: booking_attendee_languages(&state.pool, &uid).await,
     };
 
     // Push to CalDAV calendar

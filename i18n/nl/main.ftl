@@ -1436,6 +1436,7 @@ email-claim-confirmed-footer = Je wordt als deelnemer aan deze afspraak toegevoe
 email-attendee-greeting = Hoi,
 email-attendee-message = Je bent als deelnemer aan een boeking toegevoegd.
 email-attendee-rescheduled-message = Een boeking waaraan je deelneemt is verzet naar een nieuw tijdstip.
+email-attendee-cancelled-message = Een boeking waaraan je deelneemt is geannuleerd.
 email-pick-new-time-subject = Verzetten: { $event }, kies een nieuw tijdstip
 email-pick-new-time-message = { $host } moet je boeking verzetten. Kies een nieuw tijdstip.
 email-pick-new-time-link = Kies een nieuw tijdstip: { $url }

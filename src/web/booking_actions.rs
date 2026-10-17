@@ -394,6 +394,7 @@ pub(super) async fn approve_booking_by_token(
         host_timezone: stored_tz.name().to_string(),
         resource_name: booking_resource_label(&state.pool, &uid).await,
         sequence: booking_ics_sequence(&state.pool, &uid).await,
+        attendee_languages: booking_attendee_languages(&state.pool, &uid).await,
     };
 
     // Push to CalDAV calendar
@@ -666,20 +667,32 @@ pub(super) async fn decline_booking_by_token(
             guest_timezone: guest_timezone.clone(),
             host_name: guest_host_name,
             host_email: guest_host_email,
-            uid: String::new(),
+            uid: booking_uid.clone().unwrap_or_default(),
             reason: reason.clone(),
             cancelled_by_host: true,
             // `lang` above is the host's (they clicked the link); the guest
             // reads this email in the language they booked in (#209).
             guest_language: crate::email::stored_booking_language(&state.pool, &bid).await,
             host_timezone: stored_tz.name().to_string(),
+            // A declined reschedule ends a booking whose invite the guest
+            // and attendees hold: its CANCEL must match that copy (#267).
+            sequence: match &booking_uid {
+                Some(uid) => booking_ics_sequence(&state.pool, uid).await,
+                None => 0,
+            },
             ..Default::default()
         };
+        let details = with_invite_holders(&state.pool, details, true).await;
         let bid = bid.clone();
         spawn_emails(async move {
             log_email_result(
                 crate::email::send_guest_decline_notice(&smtp_config, &details).await,
                 "guest_decline_notice",
+                &bid,
+            );
+            log_email_result(
+                crate::email::send_guest_attendee_cancellations(&smtp_config, &details).await,
+                "attendee_cancellation",
                 &bid,
             );
         });
@@ -1024,9 +1037,9 @@ pub(super) async fn guest_cancel_booking(
         return resp;
     }
     #[allow(clippy::type_complexity)]
-    let booking: Option<(String, String, String, String, String, String, String, String, String, String, String, Option<String>, String, Option<String>, Option<String>)> =
+    let booking: Option<(String, String, String, String, String, String, String, String, String, String, String, Option<String>, String, Option<String>, Option<String>, String)> =
         sqlx::query_as(
-            "SELECT b.id, b.uid, b.guest_name, b.guest_email, CASE b.time_version WHEN 1 THEN b.start_at ELSE rtrim(b.start_at, 'Z') END AS start_at, CASE b.time_version WHEN 1 THEN b.end_at ELSE rtrim(b.end_at, 'Z') END AS end_at, et.title, u.name, COALESCE(u.booking_email, u.email), COALESCE(b.guest_timezone, 'UTC'), et.id, b.guest_phone, et.sms_phone_mode, u.language, b.language
+            "SELECT b.id, b.uid, b.guest_name, b.guest_email, CASE b.time_version WHEN 1 THEN b.start_at ELSE rtrim(b.start_at, 'Z') END AS start_at, CASE b.time_version WHEN 1 THEN b.end_at ELSE rtrim(b.end_at, 'Z') END AS end_at, et.title, u.name, COALESCE(u.booking_email, u.email), COALESCE(b.guest_timezone, 'UTC'), et.id, b.guest_phone, et.sms_phone_mode, u.language, b.language, b.status
              FROM bookings b
              JOIN event_types et ON et.id = b.event_type_id
              JOIN accounts a ON a.id = et.account_id
@@ -1054,6 +1067,7 @@ pub(super) async fn guest_cancel_booking(
         sms_phone_mode,
         host_language,
         booking_language,
+        prev_status,
     ) = match booking {
         Some(b) => b,
         None => {
@@ -1167,7 +1181,11 @@ pub(super) async fn guest_cancel_booking(
         host_language: crate::email::supported_language(host_language),
         host_timezone: stored_tz.name().to_string(),
         sequence,
+        ..Default::default()
     };
+    // Its attendees hold the invite if it was ever confirmed, even when this
+    // cancels a reschedule still awaiting approval (#267).
+    let details = with_invite_holders(&state.pool, details, prev_status == "pending").await;
 
     // Send cancellation emails
     if let Ok(Some(smtp_config)) =
@@ -1210,6 +1228,11 @@ pub(super) async fn guest_cancel_booking(
             log_email_result(
                 crate::email::send_guest_cancellation(&smtp_config, &guest_details).await,
                 "guest_cancellation",
+                &details.uid,
+            );
+            log_email_result(
+                crate::email::send_guest_attendee_cancellations(&smtp_config, &guest_details).await,
+                "attendee_cancellation",
                 &details.uid,
             );
             for host_details in &host_notices {
@@ -2198,6 +2221,7 @@ pub(super) async fn guest_reschedule_booking(
             host_language: host_language.clone(),
             host_timezone: host_tz.name().to_string(),
             sequence: booking_ics_sequence(&state.pool, &uid).await,
+            attendee_languages: booking_attendee_languages(&state.pool, &uid).await,
             ..Default::default()
         };
         caldav_push_booking(

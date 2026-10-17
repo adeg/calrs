@@ -1435,6 +1435,7 @@ email-claim-confirmed-footer = Você será adicionado como participante desta re
 email-attendee-greeting = Olá,
 email-attendee-message = Você foi adicionado como participante de um agendamento.
 email-attendee-rescheduled-message = Um agendamento do qual você participa foi remarcado para um novo horário.
+email-attendee-cancelled-message = Um agendamento do qual você participa foi cancelado.
 email-pick-new-time-subject = Reagendamento: { $event }, escolha um novo horário
 email-pick-new-time-message = { $host } precisa reagendar o seu agendamento. Escolha um novo horário, por favor.
 email-pick-new-time-link = Escolher um novo horário: { $url }

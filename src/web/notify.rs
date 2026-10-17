@@ -432,6 +432,7 @@ async fn send_due_reminders(pool: SqlitePool, secret_key: [u8; 32]) {
             host_timezone: stored_tz_str.to_string(),
             resource_name: booking_resource_label(&pool, uid).await,
             sequence: booking_ics_sequence(&pool, uid).await,
+            attendee_languages: Vec::new(),
         };
 
         let guest_cancel_url = cancel_token.as_ref().and_then(|t| {

@@ -216,7 +216,10 @@ pub async fn send_guest_attendee_confirmations(
     config: &SmtpConfig,
     details: &BookingDetails,
 ) -> Result<()> {
-    send_guest_attendee_copies(config, details, compose_attendee_confirmation(details)).await
+    send_guest_attendee_copies(config, details, |lang| {
+        compose_attendee_confirmation(details, lang)
+    })
+    .await
 }
 
 /// "A booking you attend has moved", with the updated invite, to each of the
@@ -232,33 +235,44 @@ pub async fn send_guest_attendee_reschedule(
     details: &BookingDetails,
     previous: Option<(&str, &str)>,
 ) -> Result<()> {
-    send_guest_attendee_copies(
-        config,
-        details,
-        compose_attendee_reschedule(details, previous),
-    )
+    send_guest_attendee_copies(config, details, |lang| {
+        compose_attendee_reschedule(details, previous, lang)
+    })
     .await
 }
 
-/// One copy of `mail` per additional attendee, each with the invite. A
-/// refused address is logged and does not stop the others.
+/// One email per additional attendee, composed in that attendee's language
+/// (`attendee_lang`), each with the invite. A refused address is logged and
+/// does not stop the others.
 async fn send_guest_attendee_copies(
     config: &SmtpConfig,
     details: &BookingDetails,
-    mail: ComposedEmail,
+    compose: impl Fn(&str) -> ComposedEmail,
 ) -> Result<()> {
     for attendee_email in &details.additional_attendees {
-        let to2: Mailbox = attendee_email.parse()?;
-        let ics2 = generate_ics(details, "REQUEST");
-        if let Err(e) = send_composed(
-            config,
-            Sender::host_of(details),
-            to2,
-            mail.clone(),
-            Some(("invite.ics", ics2, "REQUEST")),
-        )
-        .await
-        {
+        let lang = attendee_lang(
+            &details.attendee_languages,
+            attendee_email,
+            guest_lang(details),
+        );
+        let result = match attendee_email.parse::<Mailbox>() {
+            Ok(to) => {
+                send_composed(
+                    config,
+                    Sender::Host {
+                        name: &details.host_name,
+                        email: &details.host_email,
+                        lang,
+                    },
+                    to,
+                    compose(lang),
+                    Some(("invite.ics", generate_ics(details, "REQUEST"), "REQUEST")),
+                )
+                .await
+            }
+            Err(e) => Err(e.into()),
+        };
+        if let Err(e) = result {
             tracing::warn!(attendee = %attendee_email, error = format!("{e:#}"), "failed to send attendee email");
         }
     }
@@ -267,10 +281,9 @@ async fn send_guest_attendee_copies(
 }
 
 /// "You've been added as an attendee" copy for the additional attendees of
-/// a booking, in the booking's language: the guest invited them, so the
-/// guest's language is the best guess at theirs.
-pub(super) fn compose_attendee_confirmation(details: &BookingDetails) -> ComposedEmail {
-    let lang = guest_lang(details);
+/// a booking, in `lang`: the booking's language, since the guest invited
+/// them, unless the attendee is a calrs user with a saved one.
+pub(super) fn compose_attendee_confirmation(details: &BookingDetails, lang: &str) -> ComposedEmail {
     let time_display = format!(
         "{} \u{2013} {} ({})",
         details.start_time, details.end_time, details.guest_timezone
@@ -306,14 +319,15 @@ pub(super) fn compose_attendee_confirmation(details: &BookingDetails) -> Compose
     .compose()
 }
 
-/// The attendees' copy of a reschedule, in the booking's language. Shows
-/// what their "you've been added" email showed, at the new time: never the
-/// guest phone or a resource name, which are the host's.
+/// The attendees' copy of a reschedule, in `lang` (see
+/// `compose_attendee_confirmation`). Shows what their "you've been added"
+/// email showed, at the new time: never the guest phone or a resource name,
+/// which are the host's.
 pub(super) fn compose_attendee_reschedule(
     details: &BookingDetails,
     previous: Option<(&str, &str)>,
+    lang: &str,
 ) -> ComposedEmail {
-    let lang = guest_lang(details);
     let time_display = format!(
         "{} \u{2013} {} ({})",
         details.start_time, details.end_time, details.guest_timezone
@@ -611,6 +625,101 @@ pub async fn send_guest_cancellation(
     send_email(config, email).await
 }
 
+/// "A booking you attend has been cancelled", with a CANCEL for the invite
+/// they hold, to each additional attendee of a booking that was confirmed
+/// at least once (#267). Sent on every path that ends such a booking: a
+/// cancellation by the guest, the host, the CLI or the sync of a deleted
+/// calendar event, and the decline or expiry of a reschedule awaiting
+/// approval. A booking never confirmed sent its attendees nothing, so it
+/// sends them nothing now (`details.additional_attendees` is empty).
+pub async fn send_guest_attendee_cancellations(
+    config: &SmtpConfig,
+    details: &CancellationDetails,
+) -> Result<()> {
+    if !details.invite_sent {
+        return Ok(());
+    }
+    let booking_lang = lang_or_en(details.guest_language.as_deref());
+    for attendee_email in &details.additional_attendees {
+        let lang = attendee_lang(&details.attendee_languages, attendee_email, booking_lang);
+        let result = match attendee_email.parse::<Mailbox>() {
+            Ok(to) => {
+                send_composed(
+                    config,
+                    Sender::Host {
+                        name: &details.host_name,
+                        email: &details.host_email,
+                        lang,
+                    },
+                    to,
+                    compose_attendee_cancellation(details, lang),
+                    Some(("cancel.ics", generate_cancel_ics(details), "CANCEL")),
+                )
+                .await
+            }
+            Err(e) => Err(e.into()),
+        };
+        if let Err(e) = result {
+            tracing::warn!(attendee = %attendee_email, error = format!("{e:#}"), "failed to send attendee cancellation");
+        }
+    }
+    Ok(())
+}
+
+/// The attendees' copy of a cancellation, in `lang`. Shows what their
+/// invite email showed, minus the reason: it was written by the guest for
+/// the host, or by the host for the guest, and can be personal. When the
+/// booking ended on a reschedule awaiting approval, its times are the
+/// requested ones, not those of the invite they hold, so the date and time
+/// are left out; the CANCEL still matches their copy by UID.
+pub(super) fn compose_attendee_cancellation(
+    details: &CancellationDetails,
+    lang: &str,
+) -> ComposedEmail {
+    let mut rows = vec![row(t(lang, "confirmed-detail-event"), &details.event_title)];
+    if !details.reschedule_pending {
+        let time_display = if details.guest_timezone.is_empty() {
+            format!("{} \u{2013} {}", details.start_time, details.end_time)
+        } else {
+            format!(
+                "{} \u{2013} {} ({})",
+                details.start_time, details.end_time, details.guest_timezone
+            )
+        };
+        rows.push(row(t(lang, "confirmed-detail-date"), &details.date));
+        rows.push(row(t(lang, "confirmed-detail-time"), time_display));
+    }
+    rows.extend([
+        row(t(lang, "email-detail-organizer"), &details.host_name),
+        row(
+            t(lang, "email-detail-booked-by"),
+            format!("{} <{}>", details.guest_name, details.guest_email),
+        ),
+    ]);
+    let subject = if details.reschedule_pending {
+        format!("[{}] {}", t(lang, "cancelled-heading"), details.event_title)
+    } else {
+        ta(
+            lang,
+            "email-cancel-subject",
+            [("event", &details.event_title), ("date", &details.date)],
+        )
+    };
+    EmailParts {
+        lang,
+        subject,
+        heading: t(lang, "email-attendee-greeting"),
+        message: t(lang, "email-attendee-cancelled-message"),
+        accent: "#dc2626",
+        rows,
+        plain_lines: vec![],
+        footer_plain: Some(t(lang, "email-cancel-ics-attached-plain")),
+        footer_html: Some(t(lang, "email-cancel-ics-attached-html")),
+        actions: vec![],
+    }
+    .compose()
+}
+
 /// Send pending notice to guest (booking awaits host approval)
 pub async fn send_guest_pending_notice(
     config: &SmtpConfig,
@@ -772,15 +881,35 @@ pub async fn send_guest_decline_notice(
 ) -> Result<()> {
     let to = named_mailbox(&details.guest_name, &details.guest_email)?;
     let composed = compose_guest_decline_notice(details);
-    let body = build_multipart_body(&composed.plain, &composed.html);
+    send_composed(
+        config,
+        Sender::host_of_cancellation(details),
+        to,
+        composed,
+        withdrawn_invite(details),
+    )
+    .await
+}
 
-    let email = config
-        .message_from(Sender::host_of_cancellation(details))?
-        .to(to)
-        .subject(composed.subject)
-        .multipart(body)?;
+/// The CANCEL a decline or an expiry carries when the guest holds the
+/// invite: the request was a reschedule of a confirmed booking, whose
+/// calendar copy still shows the confirmed time, and the booking is now
+/// over (#267). A new request sent no invite, so it carries none.
+fn withdrawn_invite(details: &CancellationDetails) -> Option<(&'static str, String, &'static str)> {
+    details
+        .invite_sent
+        .then(|| ("cancel.ics", generate_cancel_ics(details), "CANCEL"))
+}
 
-    send_email(config, email).await
+/// The "calendar cancellation attached" note for `withdrawn_invite`, as
+/// (plain, html).
+fn withdrawn_invite_note(lang: &str, details: &CancellationDetails) -> Option<(String, String)> {
+    details.invite_sent.then(|| {
+        (
+            t(lang, "email-cancel-ics-attached-plain"),
+            t(lang, "email-cancel-ics-attached-html"),
+        )
+    })
 }
 
 /// The guest's "your request was declined" email, in the language stored
@@ -827,6 +956,10 @@ pub(super) fn compose_guest_decline_notice(details: &CancellationDetails) -> Com
     if let Some(r) = &details.reason {
         plain.push_str(&format!("{} {}\n\n", label_reason, r));
     }
+    let note = withdrawn_invite_note(lang, details);
+    if let Some((note_plain, _)) = &note {
+        plain.push_str(&format!("{note_plain}\n\n"));
+    }
     plain.push_str(&signature);
 
     let mut rows = vec![
@@ -860,7 +993,7 @@ pub(super) fn compose_guest_decline_notice(details: &CancellationDetails) -> Com
         &h(&headline),
         "#dc2626",
         &rows,
-        None,
+        note.as_ref().map(|(_, html)| html.as_str()),
         &[],
     );
 
@@ -887,15 +1020,14 @@ pub async fn send_guest_pending_expired(
 ) -> Result<()> {
     let to = named_mailbox(&details.guest_name, &details.guest_email)?;
     let composed = compose_guest_pending_expired(details, rebook_url);
-    let body = build_multipart_body(&composed.plain, &composed.html);
-
-    let email = config
-        .message_from(Sender::host_of_cancellation(details))?
-        .to(to)
-        .subject(composed.subject)
-        .multipart(body)?;
-
-    send_email(config, email).await
+    send_composed(
+        config,
+        Sender::host_of_cancellation(details),
+        to,
+        composed,
+        withdrawn_invite(details),
+    )
+    .await
 }
 
 fn compose_guest_pending_expired(
@@ -942,6 +1074,10 @@ fn compose_guest_pending_expired(
     if let Some(url) = rebook_url {
         plain.push_str(&format!("{}: {}\n\n", action_label, url));
     }
+    let note = withdrawn_invite_note(lang, details);
+    if let Some((note_plain, _)) = &note {
+        plain.push_str(&format!("{note_plain}\n\n"));
+    }
     plain.push_str(&signature);
 
     let rows = vec![
@@ -977,7 +1113,7 @@ fn compose_guest_pending_expired(
         &h(&headline),
         "#dc2626",
         &rows,
-        None,
+        note.as_ref().map(|(_, html)| html.as_str()),
         &actions,
     );
 

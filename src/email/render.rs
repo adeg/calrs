@@ -537,6 +537,13 @@ pub(super) fn generate_cancel_ics(details: &CancellationDetails) -> String {
     let guest_name = sanitize_ics_param(&details.guest_name);
     let host_email = sanitize_ics(&details.host_email);
     let guest_email = sanitize_ics(&details.guest_email);
+    // RFC 5546 3.2.5: a CANCEL names the attendees it removes the event for,
+    // here everyone the invite listed (#267).
+    let additional_attendee_lines: String = details
+        .additional_attendees
+        .iter()
+        .map(|email| format!("ATTENDEE:mailto:{}\r\n", sanitize_ics(email)))
+        .collect();
     let dtstamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let (dtstart, dtend) = details.utc_times.clone().unwrap_or_else(|| {
         convert_to_utc(
@@ -560,6 +567,7 @@ pub(super) fn generate_cancel_ics(details: &CancellationDetails) -> String {
          SUMMARY:{summary}\r\n\
          ORGANIZER;CN={host_name}:mailto:{host_email}\r\n\
          ATTENDEE;CN={guest_name}:mailto:{guest_email}\r\n\
+         {additional_attendee_lines}\
          STATUS:CANCELLED\r\n\
          END:VEVENT\r\n\
          END:VCALENDAR\r\n",
@@ -573,6 +581,7 @@ pub(super) fn generate_cancel_ics(details: &CancellationDetails) -> String {
         host_email = host_email,
         guest_name = guest_name,
         guest_email = guest_email,
+        additional_attendee_lines = additional_attendee_lines,
     ))
 }
 

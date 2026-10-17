@@ -1243,6 +1243,8 @@ async fn cancel_orphaned_booking(
         },
         None => details,
     };
+    // Its attendees hold the invite too (#267).
+    let details = crate::web::with_invite_holders(pool, details, false).await;
 
     if let Err(e) = crate::email::send_guest_cancellation(&smtp_config, &details).await {
         tracing::warn!(
@@ -1250,6 +1252,7 @@ async fn cancel_orphaned_booking(
             "failed to send external cancellation email to guest"
         );
     }
+    let _ = crate::email::send_guest_attendee_cancellations(&smtp_config, &details).await;
     if let Err(e) = crate::email::send_host_cancellation(&smtp_config, &host_details).await {
         tracing::warn!(
             error = format!("{e:#}"),

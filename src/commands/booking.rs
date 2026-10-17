@@ -518,7 +518,11 @@ pub async fn run(pool: &SqlitePool, key: &[u8; 32], cmd: BookingCommands) -> Res
                                 host_language: crate::email::supported_language(host_language),
                                 host_timezone: host_timezone.unwrap_or_default(),
                                 sequence,
+                                ..Default::default()
                             };
+                            // Its attendees hold the invite too (#267).
+                            let details =
+                                crate::web::with_invite_holders(pool, details, false).await;
 
                             print!(
                                 "  {} Sending cancellation to {}… ",
@@ -550,6 +554,15 @@ pub async fn run(pool: &SqlitePool, key: &[u8; 32], cmd: BookingCommands) -> Res
                                 Ok(_) => println!("{}", "sent".green()),
                                 Err(e) => println!("{} {}", "failed:".red(), e),
                             }
+                            for attendee in &guest_details.additional_attendees {
+                                println!("  {} Sending cancellation to {}", "…".dimmed(), attendee);
+                            }
+                            // Failures are logged per attendee.
+                            let _ = crate::email::send_guest_attendee_cancellations(
+                                &smtp_config,
+                                &guest_details,
+                            )
+                            .await;
 
                             print!(
                                 "  {} Sending cancellation to {}… ",

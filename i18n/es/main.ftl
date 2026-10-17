@@ -1435,6 +1435,7 @@ email-claim-confirmed-footer = Se te añadirá como participante en esta reunió
 email-attendee-greeting = Hola,
 email-attendee-message = Te han añadido como participante en una reserva.
 email-attendee-rescheduled-message = Una reserva en la que participas ha cambiado de horario.
+email-attendee-cancelled-message = Una reserva en la que participas ha sido cancelada.
 email-pick-new-time-subject = Reprogramación: { $event }, elige una nueva hora
 email-pick-new-time-message = { $host } necesita reprogramar tu reserva. Elige una nueva hora, por favor.
 email-pick-new-time-link = Elegir una nueva hora: { $url }

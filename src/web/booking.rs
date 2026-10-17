@@ -727,6 +727,7 @@ pub(super) async fn handle_group_booking(
         host_timezone: host_tz.name().to_string(),
         resource_name: booking_resource_label(&state.pool, &uid).await,
         sequence: 0,
+        attendee_languages: Vec::new(),
     };
 
     // For confirmed bookings, push to CalDAV and notify watchers regardless of
@@ -1325,6 +1326,7 @@ async fn handle_dynamic_group_booking(
         host_timezone: host_tz.name().to_string(),
         resource_name: booking_resource_label(&state.pool, &uid).await,
         sequence: 0,
+        attendee_languages: Vec::new(),
     };
 
     // Push confirmed bookings to the owner's CalDAV regardless of SMTP.
@@ -1903,6 +1905,7 @@ pub(super) async fn handle_booking_for_user(
             host_timezone: host_tz.name().to_string(),
             resource_name: booking_resource_label(&state.pool, &uid).await,
             sequence: 0,
+            attendee_languages: Vec::new(),
         };
 
         // Push confirmed bookings to CalDAV regardless of SMTP availability.
@@ -2673,6 +2676,7 @@ pub(super) async fn handle_booking(
             host_timezone: host_tz.name().to_string(),
             resource_name: booking_resource_label(&state.pool, &uid).await,
             sequence: 0,
+            attendee_languages: Vec::new(),
         };
 
         // Push confirmed bookings to CalDAV regardless of SMTP availability.

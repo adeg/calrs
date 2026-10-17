@@ -412,7 +412,11 @@ async fn notify_pending_expired(
         host_language: None,
         host_timezone: stored_tz.name().to_string(),
         sequence: booking_ics_sequence(pool, &uid).await,
+        ..Default::default()
     };
+    // An expired reschedule of a confirmed booking withdraws the invite the
+    // guest and the attendees hold (#267).
+    let details = with_invite_holders(pool, details, true).await;
 
     if let Some(smtp_config) = smtp_config {
         let rebook_url = event_type_rebook_url(pool, &et_id).await;
@@ -420,6 +424,11 @@ async fn notify_pending_expired(
             crate::email::send_guest_pending_expired(smtp_config, &details, rebook_url.as_deref())
                 .await,
             "guest_pending_expired",
+            &uid,
+        );
+        log_email_result(
+            crate::email::send_guest_attendee_cancellations(smtp_config, &details).await,
+            "attendee_cancellation",
             &uid,
         );
         for (name, email, language) in &hosts {

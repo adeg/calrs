@@ -898,6 +898,66 @@ pub(crate) async fn booking_ics_sequence(pool: &SqlitePool, booking_uid: &str) -
         .unwrap_or(0)
 }
 
+/// Saved language of the watcher who claimed the booking, under the address
+/// the claim listed them as an attendee with (#267). The attendee emails a
+/// later reschedule or cancellation sends them read it instead of the
+/// guest's. Empty when nobody claimed it or the claimant has no saved one.
+pub(crate) async fn booking_attendee_languages(
+    pool: &SqlitePool,
+    booking_uid: &str,
+) -> Vec<(String, String)> {
+    sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT COALESCE(u.booking_email, u.email), u.language FROM bookings b
+         JOIN users u ON u.id = b.claimed_by_user_id WHERE b.uid = ?",
+    )
+    .bind(booking_uid)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .filter_map(|(email, lang)| crate::email::supported_language(lang).map(|l| (email, l)))
+    .collect()
+}
+
+/// Fill in who holds the invite of a booking being cancelled, declined or
+/// expired (#267): whether it was ever confirmed (`first_confirmed_at`), and
+/// then its additional attendees with their languages. A booking never
+/// confirmed sent no invite, so its attendees are left empty and get
+/// nothing. `was_pending` says the booking ended while awaiting approval:
+/// if it was confirmed before, that was a reschedule, and the times on the
+/// row are the requested ones rather than those of the copies.
+pub(crate) async fn with_invite_holders(
+    pool: &SqlitePool,
+    details: crate::email::CancellationDetails,
+    was_pending: bool,
+) -> crate::email::CancellationDetails {
+    let invite_sent = sqlx::query_scalar::<_, bool>(
+        "SELECT first_confirmed_at IS NOT NULL FROM bookings WHERE uid = ?",
+    )
+    .bind(&details.uid)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(false);
+    if !invite_sent {
+        return crate::email::CancellationDetails {
+            invite_sent: false,
+            reschedule_pending: false,
+            additional_attendees: Vec::new(),
+            attendee_languages: Vec::new(),
+            ..details
+        };
+    }
+    crate::email::CancellationDetails {
+        invite_sent: true,
+        reschedule_pending: was_pending,
+        additional_attendees: booking_additional_attendees(pool, &details.uid).await,
+        attendee_languages: booking_attendee_languages(pool, &details.uid).await,
+        ..details
+    }
+}
+
 /// Release one specific resource's reservation for a booking, fetched by
 /// id (used when a reschedule re-pick moves the booking off a resource the
 /// row no longer references).

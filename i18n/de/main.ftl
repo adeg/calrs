@@ -1435,6 +1435,7 @@ email-claim-confirmed-footer = Du wirst als Teilnehmer zu diesem Termin hinzugef
 email-attendee-greeting = Hallo,
 email-attendee-message = Du wurdest als Teilnehmer zu einer Buchung hinzugefügt.
 email-attendee-rescheduled-message = Eine Buchung, an der du teilnimmst, wurde auf einen neuen Termin verschoben.
+email-attendee-cancelled-message = Eine Buchung, an der du teilnimmst, wurde storniert.
 email-pick-new-time-subject = Verschiebung: { $event }, bitte wähle einen neuen Termin
 email-pick-new-time-message = { $host } muss deine Buchung verschieben. Bitte wähle einen neuen Termin.
 email-pick-new-time-link = Neuen Termin wählen: { $url }
