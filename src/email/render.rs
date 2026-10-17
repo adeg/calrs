@@ -184,6 +184,34 @@ pub(super) fn sanitize_ics_param(value: &str) -> String {
     }
 }
 
+/// Fold every content line longer than 75 octets (RFC 5545 §3.1): the line
+/// is broken with CRLF followed by a single space, and the space counts
+/// towards the next line's 75. Breaks fall on UTF-8 character boundaries, so
+/// an accented name or an em dash in a SUMMARY is never split mid-character.
+/// Applied once to the whole output of each generator, after every line is
+/// assembled, so no field can be forgotten. Strict parsers reject unfolded
+/// lines, and DESCRIPTION grows with the guest phone and notes (#267).
+pub fn fold_ics(ics: &str) -> String {
+    const MAX: usize = 75;
+    let mut out = String::with_capacity(ics.len() + ics.len() / MAX * 3);
+    for (i, line) in ics.split("\r\n").enumerate() {
+        if i > 0 {
+            out.push_str("\r\n");
+        }
+        let mut width = 0;
+        for c in line.chars() {
+            let len = c.len_utf8();
+            if width + len > MAX {
+                out.push_str("\r\n ");
+                width = 1;
+            }
+            out.push(c);
+            width += len;
+        }
+    }
+    out
+}
+
 /// Convert date + start/end times from a guest timezone to UTC ICS format (YYYYMMDDTHHMMSSZ).
 /// Falls back to floating time (no Z) if timezone parsing fails.
 pub(super) fn convert_to_utc(
@@ -454,7 +482,7 @@ fn generate_ics_impl(
             &details.guest_timezone,
         )
     });
-    format!(
+    fold_ics(&format!(
         "BEGIN:VCALENDAR\r\n\
          VERSION:2.0\r\n\
          PRODID:-//calrs//calrs//EN\r\n\
@@ -491,7 +519,7 @@ fn generate_ics_impl(
         guest_name = guest_name,
         guest_email = guest_email,
         additional_attendee_lines = additional_attendee_lines,
-    )
+    ))
 }
 
 /// Generate an .ics VCALENDAR for cancellation (METHOD:CANCEL)
@@ -516,7 +544,7 @@ pub(super) fn generate_cancel_ics(details: &CancellationDetails) -> String {
             &details.guest_timezone,
         )
     });
-    format!(
+    fold_ics(&format!(
         "BEGIN:VCALENDAR\r\n\
          VERSION:2.0\r\n\
          PRODID:-//calrs//calrs//EN\r\n\
@@ -541,7 +569,7 @@ pub(super) fn generate_cancel_ics(details: &CancellationDetails) -> String {
         host_email = host_email,
         guest_name = guest_name,
         guest_email = guest_email,
-    )
+    ))
 }
 
 // --- Composition shared by the translated emails ---

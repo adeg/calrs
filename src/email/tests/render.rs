@@ -158,7 +158,9 @@ fn generate_ics_caldav_marks_attendees_schedule_agent_client() {
         ..Default::default()
     };
 
-    let caldav = generate_ics_caldav(&details);
+    // The guest's ATTENDEE line is over 75 octets and folded (#267): read
+    // the logical lines.
+    let caldav = crate::utils::unfold_ical(&generate_ics_caldav(&details)).into_owned();
     assert!(!caldav.contains("METHOD:"), "CalDAV PUT must omit METHOD");
     assert!(caldav
         .contains("ATTENDEE;SCHEDULE-AGENT=CLIENT;CN=Jane Doe;RSVP=TRUE:mailto:jane@example.com"));
@@ -668,7 +670,8 @@ fn caldav_ics_quotes_a_guest_name_with_a_semicolon() {
         additional_attendees: vec![],
         ..Default::default()
     };
-    let ics = generate_ics_caldav(&details);
+    // Folded on the wire (#267); the quoting is checked on the logical line.
+    let ics = crate::utils::unfold_ical(&generate_ics_caldav(&details)).into_owned();
 
     assert!(
         ics.contains(
@@ -1985,4 +1988,107 @@ fn generate_ics_caldav_carries_phone_and_notes() {
         ..details
     });
     assert!(phone_only.contains("DESCRIPTION:Phone: +33612345678\r\n"));
+}
+
+// --- RFC 5545 §3.1 line folding (#267) ---
+
+#[test]
+fn fold_ics_leaves_short_lines_alone() {
+    let ics = "BEGIN:VCALENDAR\r\nSUMMARY:Short\r\nEND:VCALENDAR\r\n";
+    assert_eq!(fold_ics(ics), ics);
+    let exact = format!("SUMMARY:{}\r\n", "x".repeat(75 - "SUMMARY:".len()));
+    assert_eq!(fold_ics(&exact), exact);
+}
+
+#[test]
+fn fold_ics_breaks_at_75_octets_and_counts_the_leading_space() {
+    let line = format!("DESCRIPTION:{}", "a".repeat(200));
+    let folded = fold_ics(&format!("{line}\r\n"));
+    let parts: Vec<&str> = folded.trim_end_matches("\r\n").split("\r\n").collect();
+    assert_eq!(parts[0].len(), 75);
+    for p in &parts[1..] {
+        assert!(p.starts_with(' '), "{p:?}");
+        assert!(p.len() <= 75, "{p:?}");
+    }
+    assert_eq!(parts[1].len(), 75);
+    assert_eq!(crate::utils::unfold_ical(&folded), format!("{line}\r\n"));
+}
+
+#[test]
+fn fold_ics_never_splits_a_utf8_character() {
+    // Two-byte and three-byte characters straddling every possible offset.
+    for prefix in 0..4 {
+        let line = format!(
+            "SUMMARY:{}{}",
+            "x".repeat(prefix),
+            "\u{e9}\u{2014}".repeat(40)
+        );
+        let folded = fold_ics(&line);
+        for part in folded.split("\r\n") {
+            assert!(part.len() <= 75, "{} octets: {part:?}", part.len());
+        }
+        // Splitting a character would have made the output invalid UTF-8,
+        // which a String cannot hold; the round trip proves nothing moved.
+        assert_eq!(crate::utils::unfold_ical(&folded), line);
+    }
+}
+
+/// Every generator's output is folded, and calrs' own reader gets the long
+/// DESCRIPTION back whole.
+#[test]
+fn generated_ics_lines_fit_in_75_octets() {
+    let details = BookingDetails {
+        event_title: "R\u{e9}union d'\u{e9}quipe trimestrielle avec beaucoup de d\u{e9}tails"
+            .into(),
+        date: "2026-03-10".into(),
+        start_time: "09:00".into(),
+        end_time: "10:00".into(),
+        guest_name: "Jos\u{e9} Mar\u{ed}a de la Fuente y Garc\u{ed}a-Rodr\u{ed}guez".into(),
+        guest_email: "jose.maria.de.la.fuente@a-rather-long-domain-name.example.com".into(),
+        guest_timezone: "UTC".into(),
+        host_name: "Alice".into(),
+        host_email: "alice@test.com".into(),
+        uid: "uid-267-fold".into(),
+        notes: Some("\u{c0} pr\u{e9}parer : le devis, la maquette et ".repeat(6)),
+        guest_phone: Some("+33612345678".into()),
+        location: Some(format!("https://meet.example.com/{}", "r".repeat(90))),
+        ..Default::default()
+    };
+    let cancel = CancellationDetails {
+        event_title: details.event_title.clone(),
+        date: details.date.clone(),
+        start_time: details.start_time.clone(),
+        end_time: details.end_time.clone(),
+        guest_name: details.guest_name.clone(),
+        guest_email: details.guest_email.clone(),
+        guest_timezone: "UTC".into(),
+        host_name: "Alice".into(),
+        host_email: "alice@test.com".into(),
+        uid: "uid-267-fold".into(),
+        ..Default::default()
+    };
+    for ics in [
+        generate_ics(&details, "REQUEST"),
+        generate_ics_caldav(&details),
+        generate_cancel_ics(&cancel),
+    ] {
+        assert!(ics.ends_with("END:VCALENDAR\r\n"), "{ics}");
+        for line in ics.split("\r\n") {
+            assert!(line.len() <= 75, "{} octets: {line:?}", line.len());
+        }
+        assert_eq!(
+            crate::utils::extract_vevent_field(&ics, "SUMMARY").as_deref(),
+            Some(
+                "R\u{e9}union d'\u{e9}quipe trimestrielle avec beaucoup de d\u{e9}tails \u{2014} Jos\u{e9} & Alice"
+            )
+        );
+    }
+    let caldav = generate_ics_caldav(&details);
+    let description = crate::utils::extract_vevent_field(&caldav, "DESCRIPTION").unwrap();
+    assert!(
+        description.starts_with(r"Phone: +33612345678\n"),
+        "{description}"
+    );
+    let notes = sanitize_ics(details.notes.as_deref().unwrap());
+    assert!(description.ends_with(notes.trim_end()), "{description}");
 }
