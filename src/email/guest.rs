@@ -174,7 +174,7 @@ pub async fn send_guest_confirmation_ex(
     let html = render_html_email_in(
         lang,
         &h(&greeting),
-        &headline,
+        &h(&headline),
         "#16a34a",
         &rows,
         Some(&footer_note_html),
@@ -466,7 +466,7 @@ pub async fn send_guest_reminder(
     let html = render_html_email_in(
         lang,
         &h(&greeting),
-        &headline,
+        &h(&headline),
         "#3b82f6",
         &rows,
         None,
@@ -595,7 +595,7 @@ pub async fn send_guest_cancellation(
     let html = render_html_email_in(
         lang,
         &h(&greeting),
-        &headline,
+        &h(&headline),
         "#dc2626",
         &rows,
         note.as_ref().map(|(_, html)| html.as_str()),

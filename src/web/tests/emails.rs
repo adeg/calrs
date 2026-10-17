@@ -1833,3 +1833,43 @@ async fn a_claimant_reads_attendee_emails_in_their_own_language() {
         assert!(other[0].contains(english), "{path}: {}", other[0]);
     }
 }
+
+/// A host cancelling names the host in the guest's headline. The name is
+/// the host's own free text, so the HTML part must escape it like every
+/// other value: the raw headline may only appear in the plain part.
+#[tokio::test]
+async fn host_cancellation_escapes_the_host_name_in_the_headline() {
+    let _env = crate::test_support::ENV_LOCK.lock().await;
+    let (app, pool, session, et_id) = setup_test_app().await;
+    let (port, mails) = spawn_capturing_mta().await;
+    use_capturing_mta(&pool, port).await;
+    let booking_id = insert_pending_french_booking(&pool, &et_id, "uid-cancel-escape").await;
+    sqlx::query("UPDATE bookings SET status = 'confirmed', language = 'en', guest_email = 'escape@test.com', start_at = '2099-06-15T10:00:00', end_at = '2099-06-15T10:30:00' WHERE id = ?")
+        .bind(&booking_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET name = '<b>Mallory</b>'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let csrf = "test-csrf-cancel-escape";
+    let response = app
+        .clone()
+        .oneshot(post_form(
+            &format!("/dashboard/bookings/{}/cancel", booking_id),
+            &session,
+            csrf,
+            &format!("_csrf={}", csrf),
+        ))
+        .await
+        .unwrap();
+    assert!(response.status().is_success() || response.status().is_redirection());
+
+    let mut args = fluent_bundle::FluentArgs::new();
+    args.set("host", "<b>Mallory</b>");
+    let raw = crate::i18n::translate("en", "email-cancel-headline-by-host", Some(&args));
+    let mail = mail_to(&mails, "escape@test.com").await;
+    assert_eq!(mail.matches(raw.as_str()).count(), 1, "{mail}");
+}
