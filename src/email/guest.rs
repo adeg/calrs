@@ -697,7 +697,11 @@ pub(super) fn compose_attendee_cancellation(
         ),
     ]);
     let subject = if details.reschedule_pending {
-        format!("[{}] {}", t(lang, "cancelled-heading"), details.event_title)
+        ta(
+            lang,
+            "email-attendee-cancelled-subject",
+            [("event", &details.event_title)],
+        )
     } else {
         ta(
             lang,

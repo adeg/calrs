@@ -1437,6 +1437,7 @@ email-attendee-greeting = Hoi,
 email-attendee-message = Je bent als deelnemer aan een boeking toegevoegd.
 email-attendee-rescheduled-message = Een boeking waaraan je deelneemt is verzet naar een nieuw tijdstip.
 email-attendee-cancelled-message = Een boeking waaraan je deelneemt is geannuleerd.
+email-attendee-cancelled-subject = Geannuleerd: { $event }
 email-original-booking-cancelled = Je oorspronkelijke boeking is ook geannuleerd.
 email-pick-new-time-subject = Verzetten: { $event }, kies een nieuw tijdstip
 email-pick-new-time-message = { $host } moet je boeking verzetten. Kies een nieuw tijdstip.

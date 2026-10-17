@@ -1306,6 +1306,26 @@ fn withdrawn_reschedule_tells_the_guest_the_original_booking_is_cancelled() {
     }
 }
 
+/// #267: the attendees' cancellation of a reschedule awaiting approval
+/// leaves the requested date out, and builds its subject from a Fluent
+/// pattern like every other subject, so each locale can order it.
+#[test]
+fn attendee_cancellation_of_a_pending_reschedule_has_a_translated_subject() {
+    let details = CancellationDetails {
+        invite_sent: true,
+        reschedule_pending: true,
+        ..cancellation_from(&sample_booking_details())
+    };
+    assert_eq!(
+        compose_attendee_cancellation(&details, "en").subject,
+        "Cancelled: 30min Intro"
+    );
+    assert_eq!(
+        compose_attendee_cancellation(&details, "fr").subject,
+        "Annul\u{e9}e : 30min Intro"
+    );
+}
+
 #[test]
 fn html_email_lang_attribute_is_escaped() {
     let html = render_html_email_in("fr\"><script>", "Hi,", "Body", "#000", &[], None, &[]);
