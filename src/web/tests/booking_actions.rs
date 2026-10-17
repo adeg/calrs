@@ -1228,6 +1228,25 @@ async fn seed_round_robin_reschedule(pool: &SqlitePool) -> (String, String, Naiv
     (alice, resched_tok, target)
 }
 
+/// #265: the reschedule slot picker offers every zone too.
+#[tokio::test]
+async fn guest_reschedule_picker_offers_every_timezone() {
+    let (app, pool, _, _) = setup_test_app().await;
+    let (_alice, resched_tok, _) = seed_round_robin_reschedule(&pool).await;
+    let response = app
+        .oneshot(get(&format!(
+            "/booking/reschedule/{}?tz=Europe%2FBucharest",
+            resched_tok
+        )))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = body_string(response).await;
+    assert_eq!(selected_options(&body, "tz-select"), ["Europe/Bucharest"]);
+    assert!(body.contains(r#"<optgroup label="Pacific Ocean">"#));
+    assert!(body.contains(r#"id="slot-offset-note" hidden"#));
+}
+
 /// End-to-end guard for #166: the slot grid a guest is offered when
 /// rescheduling a round-robin team booking must come from the assigned
 /// member's calendar. Before the fix it came from the event type owner's,
@@ -1457,4 +1476,53 @@ async fn guest_reschedule_post_honours_availability_overrides() {
         format!("{tuesday}T13:00:00Z"),
         "13:00 is inside the override's custom hours"
     );
+}
+
+/// #267: the guest cancel reads the booking, then cancels it. When an
+/// approval or a reschedule lands in between, whether the cancellation ends
+/// a reschedule awaiting approval must follow the status the booking
+/// actually left, not the one read first.
+#[tokio::test]
+async fn guest_cancel_reports_the_status_it_actually_left() {
+    let (_app, pool, _session, et_id) = setup_test_app().await;
+    let start = Utc::now() + Duration::days(20);
+    // Read as pending, approved since.
+    let approved =
+        insert_v1_booking(&pool, &et_id, "a@test.com", start, 30, "confirmed", &[]).await;
+    assert_eq!(
+        cancel_from_status(&pool, &approved, "pending")
+            .await
+            .as_deref(),
+        Some("confirmed")
+    );
+    assert_eq!(booking_status(&pool, &approved).await, "cancelled");
+    // Read as confirmed, sent back to pending by a reschedule since.
+    let moved = insert_v1_booking(
+        &pool,
+        &et_id,
+        "m@test.com",
+        start + Duration::hours(2),
+        30,
+        "pending",
+        &[],
+    )
+    .await;
+    assert_eq!(
+        cancel_from_status(&pool, &moved, "confirmed")
+            .await
+            .as_deref(),
+        Some("pending")
+    );
+    // Already over: nothing to cancel, nothing changed.
+    assert_eq!(
+        cancel_from_status(&pool, &approved, "confirmed").await,
+        None
+    );
+    sqlx::query("UPDATE bookings SET status = 'declined' WHERE id = ?")
+        .bind(&moved)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(cancel_from_status(&pool, &moved, "pending").await, None);
+    assert_eq!(booking_status(&pool, &moved).await, "declined");
 }

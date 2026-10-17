@@ -434,6 +434,57 @@ async fn public_slots_page_returns_200() {
     );
 }
 
+/// #265: the clock-change note is computed by the slot page's script, and
+/// the suite has no JavaScript runner, so this pins the rules review asked
+/// for in the source itself.
+#[test]
+fn slots_offset_note_script_keeps_its_rules() {
+    let src = std::fs::read_to_string("templates/slots.html").unwrap();
+    // English change dates read "25 October", not "October 25".
+    assert!(src.contains("if (pageLang === 'en') pageLang = 'en-GB';"));
+    // On the change day itself, slots before the change keep the old
+    // offset, so that day gets the range wording.
+    assert!(src.contains("if (c && c.change === ds) return rangeNoteText(c);"));
+    // Intl's "GMT" at zero offset reads "UTC+0", like the picker labels.
+    assert!(src.contains("return /^UTC([+-]0(:00)?)?$/.test(s) ? 'UTC+0' : s;"));
+    // Week and column views both look only at days with times.
+    assert!(src.contains("return (slotData[d.dateStr] || []).length > 0;"));
+    assert!(src.contains("if (!slots || slots.length === 0) continue;"));
+}
+
+/// #265: the guest picker offers every zone, whatever the guest's own one,
+/// and selects the guest's exactly once. The page also carries what the
+/// clock-change note needs.
+#[tokio::test]
+async fn slots_page_offers_every_timezone_and_selects_the_guest_one() {
+    let (app, _, _, _) = setup_test_app().await;
+    let response = app
+        .clone()
+        .oneshot(get("/u/testuser/test-meeting?tz=Europe%2FBucharest"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = body_string(response).await;
+    assert_eq!(selected_options(&body, "tz-select"), ["Europe/Bucharest"]);
+    assert_eq!(body.matches(r#"value="Europe&#x2f;Bucharest""#).count(), 1);
+    assert!(body.contains(r#"<optgroup label="Common timezones">"#));
+    assert!(body.contains(r#"id="slot-offset-note" hidden"#));
+    assert!(body.contains(r#""lang": "en""#));
+    assert!(body.contains(r#""offsetNoteDay": "Times on %1 are %2 (clocks change on %3).""#));
+    assert!(
+        body.contains(r#""offsetNoteRange": "Clocks change on %1: from then on, times are %2.""#)
+    );
+
+    // A guest elsewhere can still pick Bucharest.
+    let response = app
+        .oneshot(get("/u/testuser/test-meeting?tz=UTC"))
+        .await
+        .unwrap();
+    let body = body_string(response).await;
+    assert_eq!(selected_options(&body, "tz-select"), ["UTC"]);
+    assert!(body.contains(r#"value="Europe&#x2f;Bucharest""#));
+}
+
 #[tokio::test]
 async fn nonexistent_profile_returns_404_or_empty() {
     let (app, _, _, _) = setup_test_app().await;

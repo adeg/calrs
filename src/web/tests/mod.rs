@@ -391,6 +391,24 @@ async fn body_string(response: axum::http::Response<Body>) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
+/// Values of the selected options in the `<select id="{id}">` of a page,
+/// unescaped, so a test can submit what a browser would.
+fn selected_options(body: &str, id: &str) -> Vec<String> {
+    let start = body
+        .find(&format!(r#"<select id="{id}""#))
+        .unwrap_or_else(|| panic!("no <select id={id:?}>"));
+    let end = start + body[start..].find("</select>").unwrap();
+    body[start..end]
+        .split("<option ")
+        .skip(1)
+        .filter(|opt| opt.split('>').next().unwrap_or("").contains(" selected"))
+        .map(|opt| {
+            let value = opt.split('"').nth(1).unwrap_or_default();
+            value.replace("&#x2f;", "/").replace("&#x2b;", "+")
+        })
+        .collect()
+}
+
 // --- POST handler helpers ---
 
 fn post_form(uri: &str, session: &str, csrf: &str, body: &str) -> axum::http::Request<Body> {
@@ -677,6 +695,20 @@ async fn mail_to(mails: &std::sync::Mutex<Vec<CapturedMail>>, email: &str) -> St
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
+}
+
+/// Every email to `email` once the background sends have finished, decoded.
+/// Unlike `mail_to`, which returns at the first one, this sees a second
+/// email that a test must rule out.
+async fn settled_mails_to(mails: &std::sync::Mutex<Vec<CapturedMail>>, email: &str) -> Vec<String> {
+    drain_emails(std::time::Duration::from_secs(10)).await;
+    mails
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| m.rcpt.iter().any(|r| r.contains(email)))
+        .map(|m| decode_quoted_printable(&m.data))
+        .collect()
 }
 
 async fn insert_pending_french_booking(pool: &SqlitePool, et_id: &str, uid: &str) -> String {

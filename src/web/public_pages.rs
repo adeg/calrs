@@ -493,10 +493,7 @@ pub(super) async fn show_group_slots(
 
     let available_dates: Vec<String> = slot_days.iter().map(|d| d.date.clone()).collect();
 
-    let tz_options: Vec<minijinja::Value> = common_timezones_with(&guest_tz_name)
-        .iter()
-        .map(|(iana, label)| context! { value => iana, label => label, selected => (*iana == guest_tz_name) })
-        .collect();
+    let tz_options = timezone_options(&guest_tz_name, lang);
 
     // Fetch team avatar for sidebar display (team_id is already in scope from
     // the initial event-type lookup).
@@ -1060,12 +1057,7 @@ async fn show_dynamic_group_slots(
 
     let available_dates: Vec<String> = slot_days.iter().map(|d| d.date.clone()).collect();
 
-    let tz_options: Vec<minijinja::Value> = common_timezones_with(&guest_tz_name)
-        .iter()
-        .map(|(iana, label)| {
-            context! { value => iana, label => label, selected => (*iana == guest_tz_name) }
-        })
-        .collect();
+    let tz_options = timezone_options(&guest_tz_name, lang);
 
     let (meeting_jitsi_label, meeting_webhook_label) = meeting_provider_labels(state).await;
     let tmpl = match state.templates.get_template("slots.html") {
@@ -1559,10 +1551,7 @@ pub(super) async fn show_slots_for_user(
 
     let available_dates: Vec<String> = slot_days.iter().map(|d| d.date.clone()).collect();
 
-    let tz_options: Vec<minijinja::Value> = common_timezones_with(&guest_tz_name)
-        .iter()
-        .map(|(iana, label)| context! { value => iana, label => label, selected => (*iana == guest_tz_name) })
-        .collect();
+    let tz_options = timezone_options(&guest_tz_name, lang);
 
     let (meeting_jitsi_label, meeting_webhook_label) = meeting_provider_labels(&state).await;
     let tmpl = match state.templates.get_template("slots.html") {
@@ -2115,10 +2104,7 @@ pub(super) async fn show_slots(
 
     let available_dates: Vec<String> = slot_days.iter().map(|d| d.date.clone()).collect();
 
-    let tz_options: Vec<minijinja::Value> = common_timezones_with(&guest_tz_name)
-        .iter()
-        .map(|(iana, label)| context! { value => iana, label => label, selected => (*iana == guest_tz_name) })
-        .collect();
+    let tz_options = timezone_options(&guest_tz_name, lang);
 
     let (meeting_jitsi_label, meeting_webhook_label) = meeting_provider_labels(&state).await;
     let tmpl = match state.templates.get_template("slots.html") {

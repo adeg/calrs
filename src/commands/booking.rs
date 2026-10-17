@@ -428,10 +428,18 @@ pub async fn run(pool: &SqlitePool, key: &[u8; 32], cmd: BookingCommands) -> Res
                         Some(reason_input)
                     };
 
-                    sqlx::query("UPDATE bookings SET status = 'cancelled' WHERE id = ?")
-                        .bind(&full_id)
-                        .execute(pool)
-                        .await?;
+                    // The prompt above can take a while: the guest or the host
+                    // may have cancelled it, or a reschedule sent it back to
+                    // pending, in the meantime. Only a booking still confirmed
+                    // is cancelled, and only then are its holders told.
+                    if !cancel_if_confirmed(pool, &full_id).await? {
+                        println!(
+                            "{} Booking {} is no longer confirmed, nothing was cancelled.",
+                            "✗".red(),
+                            &full_id[..8]
+                        );
+                        return Ok(());
+                    }
                     println!("{} Booking {} cancelled.", "✓".green(), &full_id[..8]);
 
                     // Remote cleanup, same order as the web cancel paths:
@@ -496,6 +504,7 @@ pub async fn run(pool: &SqlitePool, key: &[u8; 32], cmd: BookingCommands) -> Res
                                 "00:00"
                             };
 
+                            let sequence = crate::web::booking_ics_sequence(pool, &uid).await;
                             let details = crate::email::CancellationDetails {
                                 utc_times,
                                 event_title,
@@ -516,7 +525,12 @@ pub async fn run(pool: &SqlitePool, key: &[u8; 32], cmd: BookingCommands) -> Res
                                 .await,
                                 host_language: crate::email::supported_language(host_language),
                                 host_timezone: host_timezone.unwrap_or_default(),
+                                sequence,
+                                ..Default::default()
                             };
+                            // Its attendees hold the invite too (#267).
+                            let details =
+                                crate::web::with_invite_holders(pool, details, false).await;
 
                             print!(
                                 "  {} Sending cancellation to {}… ",
@@ -548,6 +562,15 @@ pub async fn run(pool: &SqlitePool, key: &[u8; 32], cmd: BookingCommands) -> Res
                                 Ok(_) => println!("{}", "sent".green()),
                                 Err(e) => println!("{} {}", "failed:".red(), e),
                             }
+                            for attendee in &guest_details.additional_attendees {
+                                println!("  {} Sending cancellation to {}", "…".dimmed(), attendee);
+                            }
+                            // Failures are logged per attendee.
+                            let _ = crate::email::send_guest_attendee_cancellations(
+                                &smtp_config,
+                                &guest_details,
+                            )
+                            .await;
 
                             print!(
                                 "  {} Sending cancellation to {}… ",
@@ -571,6 +594,21 @@ pub async fn run(pool: &SqlitePool, key: &[u8; 32], cmd: BookingCommands) -> Res
     }
 
     Ok(())
+}
+
+/// Cancel a booking if it is still confirmed. `false` when it no longer is
+/// (cancelled, declined or sent back to pending since it was read), in
+/// which case nothing changed. Bumps the SEQUENCE so the CANCEL sent next
+/// outranks the copy its holders have (RFC 5546, migration 072).
+async fn cancel_if_confirmed(pool: &SqlitePool, booking_id: &str) -> Result<bool> {
+    let updated = sqlx::query(
+        "UPDATE bookings SET status = 'cancelled', ics_sequence = ics_sequence + 1 WHERE id = ? AND status = 'confirmed'",
+    )
+    .bind(booking_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(updated == 1)
 }
 
 #[cfg(test)]
@@ -777,6 +815,52 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
+    }
+
+    /// The CLI cancel prompts for a reason between reading the booking and
+    /// cancelling it. A booking that stopped being confirmed meanwhile must
+    /// be left alone, so its holders are not sent a cancellation.
+    #[tokio::test]
+    async fn cli_cancel_only_cancels_a_booking_still_confirmed() {
+        let pool = setup_db().await;
+        let (_user_id, _account_id, et_id) = seed_event_type(&pool).await;
+        let pending = insert_booking(
+            &pool,
+            &et_id,
+            "Moved Guest",
+            "moved@guest.com",
+            "2030-06-15T10:00:00",
+            "2030-06-15T10:30:00",
+            "pending",
+        )
+        .await;
+        let confirmed = insert_booking(
+            &pool,
+            &et_id,
+            "Kept Guest",
+            "kept@guest.com",
+            "2030-06-16T10:00:00",
+            "2030-06-16T10:30:00",
+            "confirmed",
+        )
+        .await;
+
+        assert!(!cancel_if_confirmed(&pool, &pending).await.unwrap());
+        assert!(cancel_if_confirmed(&pool, &confirmed).await.unwrap());
+        assert!(!cancel_if_confirmed(&pool, &confirmed).await.unwrap());
+        let statuses: Vec<String> =
+            sqlx::query_scalar("SELECT status FROM bookings ORDER BY start_at")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(statuses, ["pending", "cancelled"]);
+        // Only the cancelled one's SEQUENCE moved, once (RFC 5546).
+        let sequences: Vec<i64> =
+            sqlx::query_scalar("SELECT ics_sequence FROM bookings ORDER BY start_at")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(sequences, [0, 1]);
     }
 
     #[tokio::test]

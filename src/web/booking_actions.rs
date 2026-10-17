@@ -209,6 +209,11 @@ pub(super) async fn approve_booking_by_token(
             .ok()
             .flatten()
             .flatten();
+    // Read before the status flip below, which stamps it. A booking that was
+    // confirmed before is a guest reschedule awaiting approval: its guest is
+    // texted "moved", not "confirmed", and its attendees were already told
+    // about the booking (#266, #267).
+    let reschedule_approval = was_confirmed_before(&state.pool, &bid).await;
 
     // Refresh the hosts' calendars before taking the lock below (bounded,
     // see `prepare_approval_hosts`).
@@ -388,22 +393,27 @@ pub(super) async fn approve_booking_by_token(
         host_language,
         host_timezone: stored_tz.name().to_string(),
         resource_name: booking_resource_label(&state.pool, &uid).await,
+        sequence: booking_ics_sequence(&state.pool, &uid).await,
+        attendee_languages: booking_attendee_languages(&state.pool, &uid).await,
     };
 
     // Push to CalDAV calendar
     caldav_push_booking(&state.pool, &state.secret_key, &user_id, &uid, &details).await;
     resource_push_booking(&state.pool, &state.secret_key, &uid, &details).await;
 
-    // Notify watcher teams
-    notify_watchers(
-        &state.pool,
-        &state.secret_key,
-        &bid,
-        &event_type_id,
-        &host_name,
-        &details,
-    )
-    .await;
+    // Notify watcher teams. An approved reschedule was offered to them when
+    // it was first confirmed: no second offer.
+    if !reschedule_approval {
+        notify_watchers(
+            &state.pool,
+            &state.secret_key,
+            &bid,
+            &event_type_id,
+            &host_name,
+            &details,
+        )
+        .await;
+    }
 
     // Send confirmation email to guest
     if let Ok(Some(smtp_config)) =
@@ -424,19 +434,15 @@ pub(super) async fn approve_booking_by_token(
             fetch_event_type_notice_minutes(&state.pool, &event_type_id).await;
         let details = details.clone();
         spawn_emails(async move {
-            log_email_result(
-                crate::email::send_guest_confirmation_ex(
-                    &smtp_config,
-                    &details,
-                    guest_cancel_url.as_deref(),
-                    guest_reschedule_url.as_deref(),
-                    cancel_notice_min,
-                    reschedule_notice_min,
-                )
-                .await,
-                "guest_confirmation",
-                &details.uid,
-            );
+            send_approval_guest_emails(
+                &smtp_config,
+                &details,
+                guest_cancel_url.as_deref(),
+                guest_reschedule_url.as_deref(),
+                (cancel_notice_min, reschedule_notice_min),
+                reschedule_approval,
+            )
+            .await;
 
             // Also send host a confirmation email (no ICS, event pushed via CalDAV)
             log_email_result(
@@ -449,7 +455,7 @@ pub(super) async fn approve_booking_by_token(
 
     // Confirmation SMS to the guest, now that the booking is confirmed. This
     // is the deferred half of the booking flow: a pending booking stays silent
-    // until the host approves it here.
+    // until the host approves it here. An approved reschedule says "moved".
     if let Some(ctx) = crate::sms::SmsContext::for_booking(
         &details,
         guest_phone.as_deref(),
@@ -458,7 +464,11 @@ pub(super) async fn approve_booking_by_token(
         crate::sms::notify_guest(
             &state.pool,
             &state.secret_key,
-            crate::sms::SmsEvent::Confirmed,
+            if reschedule_approval {
+                crate::sms::SmsEvent::Rescheduled
+            } else {
+                crate::sms::SmsEvent::Confirmed
+            },
             ctx,
         )
         .await;
@@ -660,20 +670,32 @@ pub(super) async fn decline_booking_by_token(
             guest_timezone: guest_timezone.clone(),
             host_name: guest_host_name,
             host_email: guest_host_email,
-            uid: String::new(),
+            uid: booking_uid.clone().unwrap_or_default(),
             reason: reason.clone(),
             cancelled_by_host: true,
             // `lang` above is the host's (they clicked the link); the guest
             // reads this email in the language they booked in (#209).
             guest_language: crate::email::stored_booking_language(&state.pool, &bid).await,
             host_timezone: stored_tz.name().to_string(),
+            // A declined reschedule ends a booking whose invite the guest
+            // and attendees hold: its CANCEL must match that copy (#267).
+            sequence: match &booking_uid {
+                Some(uid) => booking_ics_sequence(&state.pool, uid).await,
+                None => 0,
+            },
             ..Default::default()
         };
+        let details = with_invite_holders(&state.pool, details, true).await;
         let bid = bid.clone();
         spawn_emails(async move {
             log_email_result(
                 crate::email::send_guest_decline_notice(&smtp_config, &details).await,
                 "guest_decline_notice",
+                &bid,
+            );
+            log_email_result(
+                crate::email::send_guest_attendee_cancellations(&smtp_config, &details).await,
+                "attendee_cancellation",
                 &bid,
             );
         });
@@ -884,6 +906,7 @@ pub(super) async fn booking_ics(
         notes,
         location: location.filter(|l| !l.is_empty()),
         host_timezone: stored_tz.name().to_string(),
+        sequence: booking_ics_sequence(&state.pool, &uid).await,
         ..Default::default()
     };
 
@@ -1007,6 +1030,49 @@ pub(super) async fn guest_cancel_form(
     Html(rendered).into_response()
 }
 
+/// Cancel a confirmed or pending booking and return the status it was
+/// cancelled from, or `None` when it was neither any more (already
+/// cancelled or declined). `observed` is the status read earlier: the
+/// UPDATE is guarded on it, so the return value is the state the booking
+/// actually left, even if an approval or a guest reschedule landed in
+/// between (#267). Whether the cancellation ends a reschedule awaiting
+/// approval depends on it.
+pub(super) async fn cancel_from_status(
+    pool: &SqlitePool,
+    booking_id: &str,
+    observed: &str,
+) -> Option<String> {
+    let mut expected = observed.to_string();
+    // Each retry follows a real transition, and a booking only moves
+    // between confirmed and pending this way, so a few attempts suffice.
+    for _ in 0..3 {
+        // Ending a confirmed booking bumps its SEQUENCE, so the CANCEL
+        // outranks the copy its holders have (RFC 5546, migration 072).
+        let changed = sqlx::query(
+            "UPDATE bookings SET status = 'cancelled', pending_expires_at = NULL, pending_since = NULL, pending_reminder_sent_at = NULL, ics_sequence = CASE status WHEN 'confirmed' THEN ics_sequence + 1 ELSE ics_sequence END WHERE id = ? AND status = ?",
+        )
+        .bind(booking_id)
+        .bind(&expected)
+        .execute(pool)
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0);
+        if changed == 1 {
+            return Some(expected);
+        }
+        let now: Option<String> = sqlx::query_scalar("SELECT status FROM bookings WHERE id = ?")
+            .bind(booking_id)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
+        match now {
+            Some(status) if status == "confirmed" || status == "pending" => expected = status,
+            _ => return None,
+        }
+    }
+    None
+}
+
 pub(super) async fn guest_cancel_booking(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1017,9 +1083,9 @@ pub(super) async fn guest_cancel_booking(
         return resp;
     }
     #[allow(clippy::type_complexity)]
-    let booking: Option<(String, String, String, String, String, String, String, String, String, String, String, Option<String>, String, Option<String>, Option<String>)> =
+    let booking: Option<(String, String, String, String, String, String, String, String, String, String, String, Option<String>, String, Option<String>, Option<String>, String)> =
         sqlx::query_as(
-            "SELECT b.id, b.uid, b.guest_name, b.guest_email, CASE b.time_version WHEN 1 THEN b.start_at ELSE rtrim(b.start_at, 'Z') END AS start_at, CASE b.time_version WHEN 1 THEN b.end_at ELSE rtrim(b.end_at, 'Z') END AS end_at, et.title, u.name, COALESCE(u.booking_email, u.email), COALESCE(b.guest_timezone, 'UTC'), et.id, b.guest_phone, et.sms_phone_mode, u.language, b.language
+            "SELECT b.id, b.uid, b.guest_name, b.guest_email, CASE b.time_version WHEN 1 THEN b.start_at ELSE rtrim(b.start_at, 'Z') END AS start_at, CASE b.time_version WHEN 1 THEN b.end_at ELSE rtrim(b.end_at, 'Z') END AS end_at, et.title, u.name, COALESCE(u.booking_email, u.email), COALESCE(b.guest_timezone, 'UTC'), et.id, b.guest_phone, et.sms_phone_mode, u.language, b.language, b.status
              FROM bookings b
              JOIN event_types et ON et.id = b.event_type_id
              JOIN accounts a ON a.id = et.account_id
@@ -1047,6 +1113,7 @@ pub(super) async fn guest_cancel_booking(
         sms_phone_mode,
         host_language,
         booking_language,
+        observed_status,
     ) = match booking {
         Some(b) => b,
         None => {
@@ -1086,29 +1153,25 @@ pub(super) async fn guest_cancel_booking(
 
     // Cancel the booking. Guarded so a double submit, or a host decline or
     // cancel in between, does not notify everyone twice.
-    let changed = sqlx::query(
-        "UPDATE bookings SET status = 'cancelled', pending_expires_at = NULL, pending_since = NULL, pending_reminder_sent_at = NULL WHERE id = ? AND status IN ('confirmed', 'pending')",
-    )
-    .bind(&bid)
-    .execute(&state.pool)
-    .await
-    .map(|r| r.rows_affected())
-    .unwrap_or(0);
-    if changed == 0 {
-        // Lost the race: report what actually happened, as the GET form does.
-        let status: Option<(String,)> = sqlx::query_as("SELECT status FROM bookings WHERE id = ?")
-            .bind(&bid)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None);
-        let (title_key, message_key) = match status {
-            Some((status,)) if status == "declined" => {
-                ("bae-title-booking-declined", "bae-body-declined-by-host")
-            }
-            _ => ("bae-title-already-cancelled", "bae-body-already-cancelled"),
-        };
-        return render_booking_action_error_keys_in(&state, lang, title_key, message_key);
-    }
+    let prev_status = match cancel_from_status(&state.pool, &bid, &observed_status).await {
+        Some(status) => status,
+        None => {
+            // Lost the race: report what actually happened, as the GET form does.
+            let status: Option<(String,)> =
+                sqlx::query_as("SELECT status FROM bookings WHERE id = ?")
+                    .bind(&bid)
+                    .fetch_optional(&state.pool)
+                    .await
+                    .unwrap_or(None);
+            let (title_key, message_key) = match status {
+                Some((status,)) if status == "declined" => {
+                    ("bae-title-booking-declined", "bae-body-declined-by-host")
+                }
+                _ => ("bae-title-already-cancelled", "bae-body-already-cancelled"),
+            };
+            return render_booking_action_error_keys_in(&state, lang, title_key, message_key);
+        }
+    };
 
     tracing::info!(booking_id = %bid, "booking cancelled by guest");
 
@@ -1140,6 +1203,7 @@ pub(super) async fn guest_cancel_booking(
     // not the browser this cancel happens to come from (#209): the page's.
     let guest_language = Some(lang.to_string());
 
+    let sequence = booking_ics_sequence(&state.pool, &uid).await;
     // Built before the SMTP block so the SMS path can borrow the same strings.
     let details = crate::email::CancellationDetails {
         utc_times: crate::booking_time::ics_times(&start_at, &end_at),
@@ -1158,7 +1222,12 @@ pub(super) async fn guest_cancel_booking(
         guest_language,
         host_language: crate::email::supported_language(host_language),
         host_timezone: stored_tz.name().to_string(),
+        sequence,
+        ..Default::default()
     };
+    // Its attendees hold the invite if it was ever confirmed, even when this
+    // cancels a reschedule still awaiting approval (#267).
+    let details = with_invite_holders(&state.pool, details, prev_status == "pending").await;
 
     // Send cancellation emails
     if let Ok(Some(smtp_config)) =
@@ -1201,6 +1270,11 @@ pub(super) async fn guest_cancel_booking(
             log_email_result(
                 crate::email::send_guest_cancellation(&smtp_config, &guest_details).await,
                 "guest_cancellation",
+                &details.uid,
+            );
+            log_email_result(
+                crate::email::send_guest_attendee_cancellations(&smtp_config, &guest_details).await,
+                "attendee_cancellation",
                 &details.uid,
             );
             for host_details in &host_notices {
@@ -1521,12 +1595,7 @@ pub(super) async fn guest_reschedule_slots(
     }).collect();
     let available_dates: Vec<String> = slot_days.iter().map(|d| d.date.clone()).collect();
 
-    let tz_options: Vec<minijinja::Value> = common_timezones_with(&guest_tz_name)
-        .iter()
-        .map(|(iana, label)| {
-            context! { value => iana, label => label, selected => (*iana == guest_tz_name) }
-        })
-        .collect();
+    let tz_options = timezone_options(&guest_tz_name, lang);
 
     let reschedule_base = format!("/booking/reschedule/{}", token);
 
@@ -1960,12 +2029,18 @@ pub(super) async fn guest_reschedule_booking(
     } else {
         (None, None)
     };
+    // Read before the UPDATE below, which stamps it when it confirms.
+    let attendees_told = was_confirmed_before(&state.pool, &booking_id).await;
+    // The booking moves, so its invite's SEQUENCE grows (#267): the update
+    // sent to the guest and the attendees, now or at approval, replaces their
+    // copy rather than being ignored as no newer.
     let update_result = sqlx::query(
         "UPDATE bookings SET time_version = 1, start_at = ?, end_at = ?, status = ?,
                 reschedule_token = ?, cancel_token = ?, confirm_token = ?,
                 reminder_sent_at = NULL, guest_timezone = ?, reschedule_by_host = 0,
                 assigned_resource_id = ?,
-                pending_expires_at = ?, pending_since = ?, pending_reminder_sent_at = NULL
+                pending_expires_at = ?, pending_since = ?, pending_reminder_sent_at = NULL,
+                ics_sequence = ics_sequence + 1
          WHERE id = ?",
     )
     .bind(&new_start_at)
@@ -2039,6 +2114,10 @@ pub(super) async fn guest_reschedule_booking(
     // keep a copy for the SMS that follows them.
     let sms_timezone = new_guest_timezone.clone();
 
+    // Both branches carry what the guest typed: the host approving the new
+    // time sees it as they did the first time (#266).
+    let (guest_notes, guest_phone_shown) = booking_guest_input(&state.pool, &uid).await;
+
     if needs_approval {
         // Guest-initiated reschedule on requires_confirmation event → pending.
         // Delete the prior CalDAV event (it will be re-pushed if/when the host approves),
@@ -2083,9 +2162,13 @@ pub(super) async fn guest_reschedule_booking(
                 host_email: host_email.clone(),
                 uid: uid.clone(),
                 location: loc_value.clone(),
+                notes: guest_notes.clone(),
+                guest_phone: guest_phone_shown,
                 host_timezone: host_tz.name().to_string(),
                 guest_language: booking_language.clone(),
                 host_language: host_language.clone(),
+                sequence: booking_ics_sequence(&state.pool, &uid).await,
+                additional_attendees: Vec::new(),
             };
 
             // Send guest pending notice with new tokens
@@ -2115,7 +2198,7 @@ pub(super) async fn guest_reschedule_booking(
                 host_name: host_name.clone(),
                 host_email,
                 uid: uid.clone(),
-                notes: None,
+                notes: guest_notes,
                 location: loc_value,
                 reminder_minutes: None,
                 additional_attendees: vec![],
@@ -2154,7 +2237,6 @@ pub(super) async fn guest_reschedule_booking(
     } else {
         // Confirmed reschedule (host-initiated or guest on non-confirmation event)
         // Push updated event to CalDAV
-        let (guest_notes, guest_phone_shown) = booking_guest_input(&state.pool, &uid).await;
         let push_details = crate::email::BookingDetails {
             utc_times: crate::booking_time::ics_times(&new_start_at, &new_end_at),
             event_title: et_title.clone(),
@@ -2175,6 +2257,8 @@ pub(super) async fn guest_reschedule_booking(
             guest_language: booking_language.clone(),
             host_language: host_language.clone(),
             host_timezone: host_tz.name().to_string(),
+            sequence: booking_ics_sequence(&state.pool, &uid).await,
+            attendee_languages: booking_attendee_languages(&state.pool, &uid).await,
             ..Default::default()
         };
         caldav_push_booking(
@@ -2226,6 +2310,12 @@ pub(super) async fn guest_reschedule_booking(
                 host_timezone: host_tz.name().to_string(),
                 guest_language: booking_language,
                 host_language,
+                sequence: push_details.sequence,
+                // The guest's moved invite replaces their confirmation one
+                // whole, so it keeps its attendees and notes (#267).
+                notes: push_details.notes.clone(),
+                additional_attendees: push_details.additional_attendees.clone(),
+                ..Default::default()
             };
             spawn_emails(async move {
                 let uid = reschedule_details.uid.as_str();
@@ -2241,6 +2331,36 @@ pub(super) async fn guest_reschedule_booking(
                     "guest_reschedule_notification",
                     uid,
                 );
+
+                // The attendees' copy moves with the guest's (#267). A booking
+                // never confirmed before (a request rescheduled once its event
+                // type stopped requiring approval) has not told them yet.
+                if attendees_told {
+                    let old_time = format!(
+                        "{} \u{2013} {}",
+                        reschedule_details.old_start_time, reschedule_details.old_end_time
+                    );
+                    log_email_result(
+                        crate::email::send_guest_attendee_reschedule(
+                            &smtp_config,
+                            &push_details,
+                            Some((&reschedule_details.old_date, &old_time)),
+                        )
+                        .await,
+                        "attendee_reschedule",
+                        uid,
+                    );
+                } else {
+                    log_email_result(
+                        crate::email::send_guest_attendee_confirmations(
+                            &smtp_config,
+                            &push_details,
+                        )
+                        .await,
+                        "attendee_confirmation",
+                        uid,
+                    );
+                }
 
                 // Notify host
                 log_email_result(
@@ -2885,21 +3005,16 @@ pub(super) async fn claim_booking(
         guest_phone: guest_phone_shown,
         location,
         reminder_minutes: None,
-        additional_attendees: vec![claimant_email.clone()],
+        // Read like every other push, so the ATTENDEE lines keep the order
+        // the next rewrite will give them (#266). The claimant was inserted
+        // above and is normally listed already.
+        additional_attendees: booking_additional_attendees(&state.pool, &uid).await,
         host_timezone: claim_host_tz.name().to_string(),
+        sequence: booking_ics_sequence(&state.pool, &uid).await,
         ..Default::default()
     };
-
-    // Also include any pre-existing additional attendees
-    let existing_attendees: Vec<(String,)> =
-        sqlx::query_as("SELECT email FROM booking_attendees WHERE booking_id = ? AND email != ?")
-            .bind(&booking_id)
-            .bind(&claimant_email)
-            .fetch_all(&state.pool)
-            .await
-            .unwrap_or_default();
-    for (email,) in &existing_attendees {
-        details.additional_attendees.push(email.clone());
+    if !details.additional_attendees.contains(&claimant_email) {
+        details.additional_attendees.push(claimant_email.clone());
     }
 
     // Re-push updated ICS to host's CalDAV (with claimant as ATTENDEE)

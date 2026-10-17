@@ -54,9 +54,25 @@ pub fn split_vevents(ical: &str) -> Vec<String> {
     blocks
 }
 
+/// Undo RFC 5545 §3.1 line folding: a CRLF (or a bare LF, which some
+/// servers send) followed by one space or tab joins the next line to the
+/// previous one. Servers fold long lines, and so does calrs since #267, so
+/// every line-based reader goes through this before looking at fields.
+pub fn unfold_ical(ical: &str) -> std::borrow::Cow<'_, str> {
+    if !ical.contains("\n ") && !ical.contains("\n\t") {
+        return std::borrow::Cow::Borrowed(ical);
+    }
+    std::borrow::Cow::Owned(
+        ical.replace("\r\n ", "")
+            .replace("\r\n\t", "")
+            .replace("\n ", "")
+            .replace("\n\t", ""),
+    )
+}
+
 /// Extract a field value from a single VEVENT block.
 pub fn extract_vevent_field(vevent: &str, field: &str) -> Option<String> {
-    for line in vevent.lines() {
+    for line in unfold_ical(vevent).lines() {
         if line.starts_with(field) {
             if let Some(colon_pos) = line.find(':') {
                 let value = line[colon_pos + 1..].trim().to_string();
@@ -76,7 +92,7 @@ pub fn extract_vevent_field(vevent: &str, field: &str) -> Option<String> {
 /// - `DTSTART:20260310T100000` (no TZID, no Z) → `None` (floating/local)
 /// - `DTSTART;VALUE=DATE:20260310` → `None` (all-day)
 pub fn extract_vevent_tzid(vevent: &str, field: &str) -> Option<String> {
-    for line in vevent.lines() {
+    for line in unfold_ical(vevent).lines() {
         if !line.starts_with(field) {
             continue;
         }
@@ -601,5 +617,27 @@ END:VCALENDAR";
             "Europe/Paris".parse::<Tz>().unwrap(),
         );
         assert_eq!(result.hour(), 16);
+    }
+
+    /// #267: calrs folds what it writes, and servers fold what they serve.
+    #[test]
+    fn extract_field_reads_folded_lines() {
+        let vevent = "BEGIN:VEVENT\r\nUID:abc\r\nSUMMARY:A long\r\n  title\r\nDESCRIPTION:one\n\ttwo\r\nDTSTART;TZID=Europe/\r\n Paris:20260310T100000\r\nEND:VEVENT";
+        assert_eq!(
+            extract_vevent_field(vevent, "SUMMARY").as_deref(),
+            Some("A long title")
+        );
+        assert_eq!(
+            extract_vevent_field(vevent, "DESCRIPTION").as_deref(),
+            Some("onetwo")
+        );
+        assert_eq!(
+            extract_vevent_tzid(vevent, "DTSTART").as_deref(),
+            Some("Europe/Paris")
+        );
+        assert!(matches!(
+            unfold_ical("UID:abc\r\nEND:VEVENT"),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 }

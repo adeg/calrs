@@ -489,6 +489,36 @@ fn oidc_error_logs_capture_underlying_detail() {
     );
 }
 
+#[test]
+fn oidc_error_with_source_logs_the_cause_chain() {
+    // oauth2 errors display a fixed sentence and keep the reason in
+    // `source()` (#264); the log must carry the whole chain.
+    #[derive(Debug)]
+    struct Outer(std::io::Error);
+    impl std::fmt::Display for Outer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("outer-display-marker")
+        }
+    }
+    impl std::error::Error for Outer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+    let err = Outer(std::io::Error::other("inner-cause-marker"));
+    assert_eq!(error_source_chain(&err), "inner-cause-marker");
+    if under_tarpaulin() {
+        return;
+    }
+    let mut status = None;
+    let log = capture_tracing(|| {
+        status = Some(oidc_error_response_with_source("oidc-ctx", &err).status());
+    });
+    assert_eq!(status, Some(axum::http::StatusCode::INTERNAL_SERVER_ERROR));
+    assert!(log.contains("outer-display-marker"), "log: {log}");
+    assert!(log.contains("inner-cause-marker"), "log: {log}");
+}
+
 // --- POST handler tests ---
 
 #[tokio::test]

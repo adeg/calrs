@@ -296,6 +296,14 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             "070_booking_organizer",
             include_str!("../migrations/070_booking_organizer.sql"),
         ),
+        (
+            "071_booking_first_confirmed",
+            include_str!("../migrations/071_booking_first_confirmed.sql"),
+        ),
+        (
+            "072_booking_ics_sequence",
+            include_str!("../migrations/072_booking_ics_sequence.sql"),
+        ),
     ];
 
     let mut applied_count = 0u32;
@@ -905,7 +913,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count.0, 70, "All 70 migrations should be tracked");
+        assert_eq!(count.0, 72, "All 72 migrations should be tracked");
     }
 
     #[tokio::test]
@@ -990,6 +998,111 @@ mod tests {
         assert_eq!((blocks, hours), (1, None));
     }
 
+    /// #266: a confirmed booking its guest moved to a time awaiting
+    /// approval is pending when 071 runs, and must be stamped as confirmed
+    /// before, or its approval tells the attendees "added" again. A pending
+    /// window opened after creation is not proof of that: a request moved
+    /// before its first approval opens one too, and must stay NULL, or its
+    /// decline cancels an invite its attendees never got.
+    #[tokio::test]
+    async fn backfill_071_stamps_pending_bookings_confirmed_before() {
+        let pool = memory_pool().await;
+        migrate(&pool).await.unwrap();
+        // Roll the schema back to just before 071.
+        sqlx::raw_sql(
+            "DROP TRIGGER booking_first_confirmed_insert;
+             DROP TRIGGER booking_first_confirmed_update;
+             ALTER TABLE bookings DROP COLUMN first_confirmed_at;
+             DELETE FROM _migrations WHERE name = '071_booking_first_confirmed';",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO users (id, email, name, role, auth_provider, username, enabled)
+                 VALUES ('u1', 'h@example.com', 'Host', 'admin', 'local', 'host', 1);
+             INSERT INTO accounts (id, name, email, timezone, user_id)
+                 VALUES ('a1', 'Host', 'h@example.com', 'UTC', 'u1');
+             INSERT INTO event_types (id, account_id, slug, title, duration_min, requires_confirmation)
+                 VALUES ('et1', 'a1', 'demo', 'Demo', 30, 1);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // (id, status, the trace set on the row)
+        let rows = [
+            ("confirmed", "confirmed", None),
+            (
+                "new-request",
+                "pending",
+                Some("pending_since = '2030-01-01T09:00:30Z'"),
+            ),
+            (
+                "meeting",
+                "pending",
+                Some("meeting_url = 'https://meet.example/x'"),
+            ),
+            ("claimed", "pending", Some("claimed_by_user_id = 'u1'")),
+            ("writeback", "pending", Some("writeback_attempts = 2")),
+            (
+                "moved-request",
+                "pending",
+                Some("pending_since = '2030-01-02T15:00:00Z'"),
+            ),
+            ("offered", "pending", None),
+            ("untraced", "pending", None),
+            (
+                "cancelled",
+                "cancelled",
+                Some("meeting_url = 'https://meet.example/y'"),
+            ),
+        ];
+        for (i, (id, status, set)) in rows.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO bookings (id, event_type_id, uid, guest_name, guest_email, guest_timezone, start_at, end_at, status, cancel_token, reschedule_token, confirm_token, created_at)
+                 VALUES (?, 'et1', ?, 'Guest', 'g@example.com', 'UTC', ?, ?, ?, ?, ?, ?, '2030-01-01 09:00:00')",
+            )
+            .bind(id)
+            .bind(format!("uid-{id}"))
+            .bind(format!("2030-03-{:02}T10:00:00", i + 1))
+            .bind(format!("2030-03-{:02}T10:30:00", i + 1))
+            .bind(status)
+            .bind(format!("c-{id}"))
+            .bind(format!("r-{id}"))
+            .bind(format!("k-{id}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+            if let Some(set) = set {
+                sqlx::query(&format!("UPDATE bookings SET {set} WHERE id = ?"))
+                    .bind(id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        }
+        sqlx::query(
+            "INSERT INTO booking_claim_tokens (id, booking_id, user_id, token, expires_at)
+             VALUES ('t1', 'offered', 'u1', 'tok', '2030-01-08 09:00:00')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        migrate(&pool).await.unwrap();
+
+        let stamped: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM bookings WHERE first_confirmed_at IS NOT NULL ORDER BY start_at",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            stamped,
+            ["confirmed", "meeting", "claimed", "writeback", "offered"]
+        );
+    }
+
     #[tokio::test]
     async fn migrate_is_idempotent() {
         let pool = memory_pool().await;
@@ -1001,7 +1114,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count.0, 70, "Still 70 migrations after second run");
+        assert_eq!(count.0, 72, "Still 72 migrations after second run");
     }
 
     #[tokio::test]

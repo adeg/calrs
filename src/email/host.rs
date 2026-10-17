@@ -774,8 +774,20 @@ pub(super) fn compose_host_reschedule_request(
     push_row(
         &mut rows,
         lang,
+        "email-detail-phone",
+        details.guest_phone.as_ref(),
+    );
+    push_row(
+        &mut rows,
+        lang,
         "confirmed-detail-location",
         details.location.as_ref(),
+    );
+    push_row(
+        &mut rows,
+        lang,
+        "confirmed-detail-notes",
+        details.notes.as_ref(),
     );
 
     let (plain_lines, actions) = approval_actions(lang, approval_urls(confirm_token, base_url));

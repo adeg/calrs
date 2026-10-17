@@ -679,18 +679,20 @@ async fn upsert_provider_events(
     for raw in raw_events {
         let vevent_blocks = split_vevents(&raw.ical);
         for vevent in &vevent_blocks {
+            // Unfolded once for the field reads below (#267).
+            let fields = crate::utils::unfold_ical(vevent);
             let uid =
-                extract_vevent_field(vevent, "UID").unwrap_or_else(|| Uuid::new_v4().to_string());
-            let summary = extract_vevent_field(vevent, "SUMMARY");
-            let start_at = extract_vevent_field(vevent, "DTSTART").unwrap_or_default();
-            let end_at = extract_vevent_field(vevent, "DTEND").unwrap_or_default();
-            let location = extract_vevent_field(vevent, "LOCATION");
-            let description = extract_vevent_field(vevent, "DESCRIPTION");
-            let status = extract_vevent_field(vevent, "STATUS");
-            let rrule = extract_vevent_field(vevent, "RRULE");
-            let recurrence_id = extract_vevent_field(vevent, "RECURRENCE-ID");
-            let transp = extract_vevent_field(vevent, "TRANSP");
-            let timezone = extract_vevent_tzid(vevent, "DTSTART");
+                extract_vevent_field(&fields, "UID").unwrap_or_else(|| Uuid::new_v4().to_string());
+            let summary = extract_vevent_field(&fields, "SUMMARY");
+            let start_at = extract_vevent_field(&fields, "DTSTART").unwrap_or_default();
+            let end_at = extract_vevent_field(&fields, "DTEND").unwrap_or_default();
+            let location = extract_vevent_field(&fields, "LOCATION");
+            let description = extract_vevent_field(&fields, "DESCRIPTION");
+            let status = extract_vevent_field(&fields, "STATUS");
+            let rrule = extract_vevent_field(&fields, "RRULE");
+            let recurrence_id = extract_vevent_field(&fields, "RECURRENCE-ID");
+            let transp = extract_vevent_field(&fields, "TRANSP");
+            let timezone = extract_vevent_tzid(&fields, "DTSTART");
 
             let event_id = Uuid::new_v4().to_string();
             let _ = sqlx::query(
@@ -796,9 +798,11 @@ async fn remove_orphaned_ews_events(
 /// Simplified booking-cancel for EWS orphan reconciliation: looks up a
 /// confirmed booking by UID and marks it cancelled. Skips the
 /// `cancel_orphaned_booking` HTTP confirm step (CalDAV-specific).
+/// It sends no CANCEL, but bumps the SEQUENCE like every cancellation, so
+/// none that a later path sends can fall behind a copy.
 async fn cancel_orphaned_booking_simple(pool: &SqlitePool, _key: &[u8; 32], uid: &str) {
     let _ = sqlx::query(
-        "UPDATE bookings SET status = 'cancelled' WHERE uid = ? AND status = 'confirmed'",
+        "UPDATE bookings SET status = 'cancelled', ics_sequence = ics_sequence + 1 WHERE uid = ? AND status = 'confirmed'",
     )
     .bind(uid)
     .execute(pool)
@@ -856,18 +860,20 @@ async fn upsert_raw_events(pool: &SqlitePool, cal_id: &str, raw_events: &[RawEve
     for raw in raw_events {
         let vevent_blocks = split_vevents(&raw.ical_data);
         for vevent in &vevent_blocks {
+            // Unfolded once for the field reads below (#267).
+            let fields = crate::utils::unfold_ical(vevent);
             let uid =
-                extract_vevent_field(vevent, "UID").unwrap_or_else(|| Uuid::new_v4().to_string());
-            let summary = extract_vevent_field(vevent, "SUMMARY");
-            let start_at = extract_vevent_field(vevent, "DTSTART").unwrap_or_default();
-            let end_at = extract_vevent_field(vevent, "DTEND").unwrap_or_default();
-            let location = extract_vevent_field(vevent, "LOCATION");
-            let description = extract_vevent_field(vevent, "DESCRIPTION");
-            let status = extract_vevent_field(vevent, "STATUS");
-            let rrule = extract_vevent_field(vevent, "RRULE");
-            let recurrence_id = extract_vevent_field(vevent, "RECURRENCE-ID");
-            let transp = extract_vevent_field(vevent, "TRANSP");
-            let timezone = extract_vevent_tzid(vevent, "DTSTART");
+                extract_vevent_field(&fields, "UID").unwrap_or_else(|| Uuid::new_v4().to_string());
+            let summary = extract_vevent_field(&fields, "SUMMARY");
+            let start_at = extract_vevent_field(&fields, "DTSTART").unwrap_or_default();
+            let end_at = extract_vevent_field(&fields, "DTEND").unwrap_or_default();
+            let location = extract_vevent_field(&fields, "LOCATION");
+            let description = extract_vevent_field(&fields, "DESCRIPTION");
+            let status = extract_vevent_field(&fields, "STATUS");
+            let rrule = extract_vevent_field(&fields, "RRULE");
+            let recurrence_id = extract_vevent_field(&fields, "RECURRENCE-ID");
+            let transp = extract_vevent_field(&fields, "TRANSP");
+            let timezone = extract_vevent_tzid(&fields, "DTSTART");
 
             let event_id = Uuid::new_v4().to_string();
             let _ = sqlx::query(
@@ -1161,9 +1167,10 @@ async fn cancel_orphaned_booking(
         }
     }
 
-    // Cancel the booking
+    // Cancel the booking. The SEQUENCE bump makes the CANCEL outrank the
+    // copy its holders have (RFC 5546, migration 072).
     let updated = sqlx::query(
-        "UPDATE bookings SET status = 'cancelled' WHERE id = ? AND status = 'confirmed'",
+        "UPDATE bookings SET status = 'cancelled', ics_sequence = ics_sequence + 1 WHERE id = ? AND status = 'confirmed'",
     )
     .bind(&booking_id)
     .execute(pool)
@@ -1198,6 +1205,7 @@ async fn cancel_orphaned_booking(
 
     // The guest and the host each read the reason in their own language.
     let guest_language = crate::email::stored_booking_language(pool, &booking_id).await;
+    let sequence = crate::web::booking_ics_sequence(pool, &booking_uid).await;
     let details = crate::email::CancellationDetails {
         utc_times,
         event_title,
@@ -1216,6 +1224,7 @@ async fn cancel_orphaned_booking(
         cancelled_by_host: true,
         guest_language,
         host_timezone: host_timezone.unwrap_or_default(),
+        sequence,
         ..Default::default()
     };
     let host_details = crate::email::CancellationDetails {
@@ -1237,6 +1246,8 @@ async fn cancel_orphaned_booking(
         },
         None => details,
     };
+    // Its attendees hold the invite too (#267).
+    let details = crate::web::with_invite_holders(pool, details, false).await;
 
     if let Err(e) = crate::email::send_guest_cancellation(&smtp_config, &details).await {
         tracing::warn!(
@@ -1244,6 +1255,7 @@ async fn cancel_orphaned_booking(
             "failed to send external cancellation email to guest"
         );
     }
+    let _ = crate::email::send_guest_attendee_cancellations(&smtp_config, &details).await;
     if let Err(e) = crate::email::send_host_cancellation(&smtp_config, &host_details).await {
         tracing::warn!(
             error = format!("{e:#}"),

@@ -230,11 +230,8 @@ fn report_ics_feed(body: &str) {
         println!("    Feed is valid but currently empty (no events published yet)");
         return;
     }
-    if let Some(name) = body
-        .lines()
-        .find(|l| l.starts_with("X-WR-CALNAME"))
-        .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))
-    {
+    // The same reader the admin form uses, which unfolds a long name.
+    if let Some(name) = crate::resources::feed_calendar_name(body) {
         println!("    Calendar name: {}", name.bold());
     } else {
         println!(
