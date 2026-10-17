@@ -1543,8 +1543,9 @@ const REASON_MAX_CHARS: usize = 512;
 /// token response parse, and cap its length. Those literals are the values
 /// serde complains about (an access token or, for an id_token claim of the
 /// wrong type, an address, email or phone number), so each one becomes
-/// `<string N chars>` unless it is a short `[A-Za-z0-9.-]` word such as
-/// `"3600"` or `"true"`. Unquoted text, the field and type names that say
+/// `<string N chars>` unless it is a short `[A-Za-z0-9.-]` word with at
+/// most six digits, such as `"3600"` or `"true"` (see `keeps_literal`).
+/// Unquoted text, the field and type names that say
 /// what went wrong, is kept.
 fn redact_reason(message: &str) -> String {
     let chars: Vec<char> = message.chars().collect();
@@ -1622,11 +1623,7 @@ fn mask_literals(
             out.extend(&chars[i..start]);
             out.push_str(&inner);
             out.extend(&chars[end - open_len..end]);
-        } else if raw.len() <= 8
-            && raw
-                .iter()
-                .all(|&c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-        {
+        } else if keeps_literal(raw) {
             out.extend(&chars[i..end]);
         } else {
             out.push_str(&format!("<string {} chars>", raw.len()));
@@ -1634,6 +1631,18 @@ fn mask_literals(
         i = end;
     }
     close.is_none().then_some(i)
+}
+
+/// Whether a literal is harmless enough to log as is: a short
+/// `[A-Za-z0-9.-]` word (`"true"`, `"Bearer"`, `"1.0"`) with at most six
+/// digits, enough for `"3600"` or an `expires_in` of `"86400"`. Seven
+/// digits or more could be a phone number, so it is masked.
+fn keeps_literal(raw: &[char]) -> bool {
+    raw.len() <= 8
+        && raw
+            .iter()
+            .all(|&c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        && raw.iter().filter(|c| c.is_ascii_digit()).count() <= 6
 }
 
 fn json_type_name(value: &serde_json::Value) -> &'static str {
@@ -2041,6 +2050,27 @@ mod tests {
             redact_reason(r#"phone_number_verified: "+33 6 12"#),
             "phone_number_verified: <string 8 chars>"
         );
+    }
+
+    #[test]
+    fn redact_reason_masks_short_literals_with_seven_digits_or_more() {
+        // An eight-digit local phone number fits the short-word length.
+        assert_eq!(
+            redact_reason(r#"invalid type: string "06123456", expected a boolean"#),
+            "invalid type: string <string 8 chars>, expected a boolean"
+        );
+        assert_eq!(
+            redact_reason("invalid type: integer `1234567`, expected a boolean"),
+            "invalid type: integer <string 7 chars>, expected a boolean"
+        );
+        // Small numbers and words stay readable.
+        for msg in [
+            r#"invalid type: string "86400", expected u64"#,
+            r#"invalid type: string "123456", expected u64"#,
+            r#"unknown variant "Bearer2", expected one of"#,
+        ] {
+            assert_eq!(redact_reason(msg), msg);
+        }
     }
 
     #[test]
