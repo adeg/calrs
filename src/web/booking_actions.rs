@@ -1030,6 +1030,47 @@ pub(super) async fn guest_cancel_form(
     Html(rendered).into_response()
 }
 
+/// Cancel a confirmed or pending booking and return the status it was
+/// cancelled from, or `None` when it was neither any more (already
+/// cancelled or declined). `observed` is the status read earlier: the
+/// UPDATE is guarded on it, so the return value is the state the booking
+/// actually left, even if an approval or a guest reschedule landed in
+/// between (#267). Whether the cancellation ends a reschedule awaiting
+/// approval depends on it.
+pub(super) async fn cancel_from_status(
+    pool: &SqlitePool,
+    booking_id: &str,
+    observed: &str,
+) -> Option<String> {
+    let mut expected = observed.to_string();
+    // Each retry follows a real transition, and a booking only moves
+    // between confirmed and pending this way, so a few attempts suffice.
+    for _ in 0..3 {
+        let changed = sqlx::query(
+            "UPDATE bookings SET status = 'cancelled', pending_expires_at = NULL, pending_since = NULL, pending_reminder_sent_at = NULL WHERE id = ? AND status = ?",
+        )
+        .bind(booking_id)
+        .bind(&expected)
+        .execute(pool)
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0);
+        if changed == 1 {
+            return Some(expected);
+        }
+        let now: Option<String> = sqlx::query_scalar("SELECT status FROM bookings WHERE id = ?")
+            .bind(booking_id)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
+        match now {
+            Some(status) if status == "confirmed" || status == "pending" => expected = status,
+            _ => return None,
+        }
+    }
+    None
+}
+
 pub(super) async fn guest_cancel_booking(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1070,7 +1111,7 @@ pub(super) async fn guest_cancel_booking(
         sms_phone_mode,
         host_language,
         booking_language,
-        prev_status,
+        observed_status,
     ) = match booking {
         Some(b) => b,
         None => {
@@ -1110,29 +1151,25 @@ pub(super) async fn guest_cancel_booking(
 
     // Cancel the booking. Guarded so a double submit, or a host decline or
     // cancel in between, does not notify everyone twice.
-    let changed = sqlx::query(
-        "UPDATE bookings SET status = 'cancelled', pending_expires_at = NULL, pending_since = NULL, pending_reminder_sent_at = NULL WHERE id = ? AND status IN ('confirmed', 'pending')",
-    )
-    .bind(&bid)
-    .execute(&state.pool)
-    .await
-    .map(|r| r.rows_affected())
-    .unwrap_or(0);
-    if changed == 0 {
-        // Lost the race: report what actually happened, as the GET form does.
-        let status: Option<(String,)> = sqlx::query_as("SELECT status FROM bookings WHERE id = ?")
-            .bind(&bid)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None);
-        let (title_key, message_key) = match status {
-            Some((status,)) if status == "declined" => {
-                ("bae-title-booking-declined", "bae-body-declined-by-host")
-            }
-            _ => ("bae-title-already-cancelled", "bae-body-already-cancelled"),
-        };
-        return render_booking_action_error_keys_in(&state, lang, title_key, message_key);
-    }
+    let prev_status = match cancel_from_status(&state.pool, &bid, &observed_status).await {
+        Some(status) => status,
+        None => {
+            // Lost the race: report what actually happened, as the GET form does.
+            let status: Option<(String,)> =
+                sqlx::query_as("SELECT status FROM bookings WHERE id = ?")
+                    .bind(&bid)
+                    .fetch_optional(&state.pool)
+                    .await
+                    .unwrap_or(None);
+            let (title_key, message_key) = match status {
+                Some((status,)) if status == "declined" => {
+                    ("bae-title-booking-declined", "bae-body-declined-by-host")
+                }
+                _ => ("bae-title-already-cancelled", "bae-body-already-cancelled"),
+            };
+            return render_booking_action_error_keys_in(&state, lang, title_key, message_key);
+        }
+    };
 
     tracing::info!(booking_id = %bid, "booking cancelled by guest");
 
