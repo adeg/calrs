@@ -13,10 +13,11 @@ enum DavMode {
     Reject,
 }
 
-/// A tiny CalDAV collection on loopback: PUT, HEAD and DELETE by path.
+/// A tiny CalDAV collection on loopback: PUT, HEAD and DELETE by path. Keeps
+/// each stored event's body so a test can read what the calendar got.
 struct MockDav {
     mode: std::sync::Mutex<DavMode>,
-    stored: std::sync::Mutex<std::collections::HashSet<String>>,
+    stored: std::sync::Mutex<std::collections::HashMap<String, String>>,
     puts: std::sync::atomic::AtomicUsize,
 }
 
@@ -30,6 +31,12 @@ impl MockDav {
     fn stored(&self) -> usize {
         self.stored.lock().unwrap().len()
     }
+    /// The body of the one event the collection holds.
+    fn only_event(&self) -> String {
+        let stored = self.stored.lock().unwrap();
+        assert_eq!(stored.len(), 1, "expected one stored event");
+        stored.values().next().unwrap().clone()
+    }
 }
 
 /// Start a mock CalDAV server and return its base URL.
@@ -37,11 +44,11 @@ async fn spawn_mock_dav(mode: DavMode) -> (String, Arc<MockDav>) {
     use axum::http::{Method, StatusCode, Uri};
     let dav = Arc::new(MockDav {
         mode: std::sync::Mutex::new(mode),
-        stored: std::sync::Mutex::new(std::collections::HashSet::new()),
+        stored: std::sync::Mutex::new(std::collections::HashMap::new()),
         puts: std::sync::atomic::AtomicUsize::new(0),
     });
     let state = dav.clone();
-    let app = Router::new().fallback(move |method: Method, uri: Uri| {
+    let app = Router::new().fallback(move |method: Method, uri: Uri, body: String| {
         let dav = state.clone();
         async move {
             let path = uri.path().to_string();
@@ -52,12 +59,12 @@ async fn spawn_mock_dav(mode: DavMode) -> (String, Arc<MockDav>) {
                     DavMode::Reject => StatusCode::BAD_REQUEST,
                     DavMode::Drop => StatusCode::CREATED,
                     DavMode::Ok => {
-                        dav.stored.lock().unwrap().insert(path);
+                        dav.stored.lock().unwrap().insert(path, body);
                         StatusCode::CREATED
                     }
                 }
             } else if method == Method::HEAD {
-                if dav.stored.lock().unwrap().contains(&path) {
+                if dav.stored.lock().unwrap().contains_key(&path) {
                     StatusCode::OK
                 } else {
                     StatusCode::NOT_FOUND
@@ -225,6 +232,109 @@ async fn retry_success_clears_the_error_without_duplicating() {
     );
     push_fresh(&pool, &host, &uid).await;
     assert_eq!(dav.stored(), 1, "a re-push must not add a second event");
+}
+
+/// #266: the retry rebuilt the event without the guest phone, so a booking
+/// whose first push failed reached the host's calendar with the notes and
+/// no phone once a retry landed.
+#[tokio::test]
+async fn a_retried_writeback_keeps_the_guest_phone_and_notes() {
+    let (pool, dav, host, id, uid) = writeback_fixture(DavMode::Reject).await;
+    sqlx::query(
+        "UPDATE event_types SET sms_phone_mode = 'optional' \
+         WHERE id = (SELECT event_type_id FROM bookings WHERE id = ?)",
+    )
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE bookings SET guest_phone = '+33612345678', notes = 'Bring the quote' WHERE id = ?",
+    )
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    push_fresh(&pool, &host, &uid).await;
+    assert_eq!(dav.stored(), 0);
+
+    dav.set_mode(DavMode::Ok);
+    let later = Utc::now() + Duration::minutes(10);
+    assert_eq!(
+        writeback::retry_failed_writebacks(&pool, &[0u8; 32], later).await,
+        1
+    );
+    let event = dav.only_event();
+    assert!(event.contains("+33612345678"), "{event}");
+    assert!(event.contains("Bring the quote"), "{event}");
+}
+
+/// #266: a claim re-pushed the host's event with no `host_language`, so the
+/// phone label fell back to English, and listed the claimant before the
+/// attendees the guest invited, the reverse of every later push.
+#[tokio::test]
+async fn a_claim_keeps_the_host_language_and_the_attendee_order() {
+    let _env = crate::test_support::ENV_LOCK.lock().await;
+    let (app, pool, _, et_id) = setup_test_app().await;
+    let host: String = sqlx::query_scalar("SELECT id FROM users WHERE email = 'test@example.com'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    set_user_language(&pool, "test@example.com", "fr").await;
+    let (base, dav) = spawn_mock_dav(DavMode::Ok).await;
+    seed_write_source(&pool, &host, &base).await;
+    sqlx::query("UPDATE event_types SET sms_phone_mode = 'optional' WHERE id = ?")
+        .bind(&et_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let id = insert_v1_booking(
+        &pool,
+        &et_id,
+        "guest@test.com",
+        Utc::now() + Duration::days(10),
+        30,
+        "confirmed",
+        &[("guest_phone", Some("+33612345678".to_string()))],
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO booking_attendees (id, booking_id, email, created_at) \
+         VALUES ('att-266', ?, 'friend@test.com', '2026-01-01 00:00:00')",
+    )
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let watcher = insert_role_user(&pool, "watcher@test.com", "user").await;
+    sqlx::query(
+        "INSERT INTO booking_claim_tokens (id, booking_id, user_id, token, expires_at) \
+         VALUES ('bct-266', ?, ?, 'claim-tok-266', datetime('now', '+7 days'))",
+    )
+    .bind(&id)
+    .bind(&watcher)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let csrf = "test-csrf-266-claim";
+    let response = app
+        .oneshot(post_form_unauthed(
+            &format!("/booking/claim/{id}"),
+            csrf,
+            &format!("_csrf={csrf}&token=claim-tok-266"),
+        ))
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let event = dav.only_event();
+    assert!(event.contains("Téléphone : +33612345678"), "{event}");
+    let friend = event.find("mailto:friend@test.com").expect("friend listed");
+    let claimant = event
+        .find("mailto:watcher@test.com")
+        .expect("claimant listed");
+    assert!(friend < claimant, "{event}");
 }
 
 /// A booking cancelled (or declined) after its write-back failed is never

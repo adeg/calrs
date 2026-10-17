@@ -142,9 +142,14 @@ pub(super) fn build_multipart_body(plain: &str, html: &str) -> MultiPart {
 // --- ICS generation ---
 
 /// Sanitize a value for use in an ICS field.
-/// Strips CR/LF to prevent ICS injection (RFC 5545 field breakout).
+/// Strips CR/LF to prevent ICS injection (RFC 5545 field breakout), and
+/// escapes the TEXT specials of RFC 5545 §3.3.11. The backslash goes first:
+/// left raw, `C:\new folder` reads as a line break and `a\;b` as an escaped
+/// semicolon (#266). Callers join already-sanitized pieces with a literal
+/// `\n`, which is why that separator is never passed through here.
 pub(super) fn sanitize_ics(value: &str) -> String {
     value
+        .replace('\\', "\\\\")
         .replace('\r', "")
         .replace('\n', " ")
         .replace(';', "\\;")

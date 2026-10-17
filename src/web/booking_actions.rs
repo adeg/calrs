@@ -209,6 +209,8 @@ pub(super) async fn approve_booking_by_token(
             .ok()
             .flatten()
             .flatten();
+    // Read before the status flip below, which stamps it.
+    let attendees_notified = was_confirmed_before(&state.pool, &bid).await;
 
     // Refresh the hosts' calendars before taking the lock below (bounded,
     // see `prepare_approval_hosts`).
@@ -437,6 +439,13 @@ pub(super) async fn approve_booking_by_token(
                 "guest_confirmation",
                 &details.uid,
             );
+            if !attendees_notified {
+                log_email_result(
+                    crate::email::send_guest_attendee_confirmations(&smtp_config, &details).await,
+                    "attendee_confirmation",
+                    &details.uid,
+                );
+            }
 
             // Also send host a confirmation email (no ICS, event pushed via CalDAV)
             log_email_result(
@@ -2039,6 +2048,10 @@ pub(super) async fn guest_reschedule_booking(
     // keep a copy for the SMS that follows them.
     let sms_timezone = new_guest_timezone.clone();
 
+    // Both branches carry what the guest typed: the host approving the new
+    // time sees it as they did the first time (#266).
+    let (guest_notes, guest_phone_shown) = booking_guest_input(&state.pool, &uid).await;
+
     if needs_approval {
         // Guest-initiated reschedule on requires_confirmation event → pending.
         // Delete the prior CalDAV event (it will be re-pushed if/when the host approves),
@@ -2083,6 +2096,8 @@ pub(super) async fn guest_reschedule_booking(
                 host_email: host_email.clone(),
                 uid: uid.clone(),
                 location: loc_value.clone(),
+                notes: guest_notes.clone(),
+                guest_phone: guest_phone_shown,
                 host_timezone: host_tz.name().to_string(),
                 guest_language: booking_language.clone(),
                 host_language: host_language.clone(),
@@ -2115,7 +2130,7 @@ pub(super) async fn guest_reschedule_booking(
                 host_name: host_name.clone(),
                 host_email,
                 uid: uid.clone(),
-                notes: None,
+                notes: guest_notes,
                 location: loc_value,
                 reminder_minutes: None,
                 additional_attendees: vec![],
@@ -2154,7 +2169,6 @@ pub(super) async fn guest_reschedule_booking(
     } else {
         // Confirmed reschedule (host-initiated or guest on non-confirmation event)
         // Push updated event to CalDAV
-        let (guest_notes, guest_phone_shown) = booking_guest_input(&state.pool, &uid).await;
         let push_details = crate::email::BookingDetails {
             utc_times: crate::booking_time::ics_times(&new_start_at, &new_end_at),
             event_title: et_title.clone(),
@@ -2226,6 +2240,7 @@ pub(super) async fn guest_reschedule_booking(
                 host_timezone: host_tz.name().to_string(),
                 guest_language: booking_language,
                 host_language,
+                ..Default::default()
             };
             spawn_emails(async move {
                 let uid = reschedule_details.uid.as_str();
@@ -2885,21 +2900,15 @@ pub(super) async fn claim_booking(
         guest_phone: guest_phone_shown,
         location,
         reminder_minutes: None,
-        additional_attendees: vec![claimant_email.clone()],
+        // Read like every other push, so the ATTENDEE lines keep the order
+        // the next rewrite will give them (#266). The claimant was inserted
+        // above and is normally listed already.
+        additional_attendees: booking_additional_attendees(&state.pool, &uid).await,
         host_timezone: claim_host_tz.name().to_string(),
         ..Default::default()
     };
-
-    // Also include any pre-existing additional attendees
-    let existing_attendees: Vec<(String,)> =
-        sqlx::query_as("SELECT email FROM booking_attendees WHERE booking_id = ? AND email != ?")
-            .bind(&booking_id)
-            .bind(&claimant_email)
-            .fetch_all(&state.pool)
-            .await
-            .unwrap_or_default();
-    for (email,) in &existing_attendees {
-        details.additional_attendees.push(email.clone());
+    if !details.additional_attendees.contains(&claimant_email) {
+        details.additional_attendees.push(claimant_email.clone());
     }
 
     // Re-push updated ICS to host's CalDAV (with claimant as ATTENDEE)

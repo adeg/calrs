@@ -59,6 +59,43 @@ fn sanitize_prevents_ics_injection() {
     assert!(!sanitized.contains('\r'));
 }
 
+/// #266: a raw backslash in a TEXT value starts an escape, so `C:\new`
+/// read as a line break and `\;` as a literal semicolon.
+#[test]
+fn sanitize_escapes_backslash_before_the_other_specials() {
+    assert_eq!(sanitize_ics(r"C:\new folder"), r"C:\\new folder");
+    // Escaped once, not twice: the `;` gains one backslash, the input's own
+    // backslash becomes two.
+    assert_eq!(sanitize_ics(r"a\;b,c"), r"a\\\;b\,c");
+}
+
+/// The DESCRIPTION joins phone and notes with a literal `\n` after each
+/// piece is sanitized, so that separator stays a single escape while a
+/// backslash the guest typed is doubled (#266).
+#[test]
+fn generate_ics_caldav_escapes_backslashes_in_notes() {
+    let details = BookingDetails {
+        event_title: "Call".to_string(),
+        date: "2026-03-10".to_string(),
+        start_time: "09:00".to_string(),
+        end_time: "10:00".to_string(),
+        guest_name: "Bob".to_string(),
+        guest_email: "bob@test.com".to_string(),
+        guest_timezone: "UTC".to_string(),
+        host_name: "Alice".to_string(),
+        host_email: "alice@test.com".to_string(),
+        uid: "uid-266".to_string(),
+        notes: Some(r"Files in C:\new folder; see you".to_string()),
+        guest_phone: Some("+33612345678".to_string()),
+        ..Default::default()
+    };
+    let ics = generate_ics_caldav(&details);
+    assert!(
+        ics.contains(r"DESCRIPTION:Phone: +33612345678\nFiles in C:\\new folder\; see you"),
+        "{ics}"
+    );
+}
+
 // --- generate_ics ---
 
 #[test]

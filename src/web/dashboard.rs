@@ -1367,6 +1367,8 @@ pub(super) async fn confirm_booking(
         Some(b) => b,
         None => return Redirect::to("/dashboard/bookings").into_response(),
     };
+    // Read before the status flip below, which stamps it.
+    let attendees_notified = was_confirmed_before(&state.pool, &bid).await;
 
     // Refresh the hosts' calendars before taking the lock below (bounded,
     // see `prepare_approval_hosts`).
@@ -1592,6 +1594,13 @@ pub(super) async fn confirm_booking(
                 "guest_confirmation",
                 &details.uid,
             );
+            if !attendees_notified {
+                log_email_result(
+                    crate::email::send_guest_attendee_confirmations(&smtp_config, &details).await,
+                    "attendee_confirmation",
+                    &details.uid,
+                );
+            }
 
             // Also send host a confirmation email (no ICS, event pushed via CalDAV)
             log_email_result(

@@ -1579,6 +1579,23 @@ fn host_reschedule_request_is_written_in_the_host_language() {
     assert!(mail.plain.contains("Log in to your dashboard"));
 }
 
+/// #266: the request for a new time shows what the guest typed, as the
+/// original approval request does.
+#[test]
+fn host_reschedule_request_shows_the_guest_phone_and_notes() {
+    let details = RescheduleDetails {
+        notes: Some("Bring the quote".to_string()),
+        guest_phone: Some("+33612345678".to_string()),
+        ..sample_reschedule_details()
+    };
+    let mail = compose_host_reschedule_request(&details, None, None);
+    assert!(mail.plain.contains("Phone: +33612345678"), "{}", mail.plain);
+    assert!(mail.plain.contains("Bring the quote"), "{}", mail.plain);
+
+    let mail = compose_host_reschedule_request(&sample_reschedule_details(), None, None);
+    assert!(!mail.plain.contains("Phone:"), "{}", mail.plain);
+}
+
 #[test]
 fn watcher_claim_offer_is_written_in_the_watcher_language() {
     let mail = compose_watcher_claim_notification(
