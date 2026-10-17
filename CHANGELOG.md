@@ -170,6 +170,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 | Write-back verified and retried | 1.19.0 | Events are read back after writing; failures are retried with backoff, flagged on the dashboard and emailed to the host; failing sources alert their owner (#162) |
 | Dutch locale | 1.19.0 | Ninth shipped language, contributed by @mdbraber |
 | `ARCHITECTURE.md` | 1.19.0 | Map of the code for contributors after `src/web` and `src/email` were split into feature modules |
+| Every timezone in every picker | 1.20.0 | All IANA zones grouped by region, with the common ones first, and a slot-page note when the clocks change before the day shown (#265) |
+| Attendees follow the booking | 1.20.0 | Additional attendees get updates when a reschedule is confirmed and cancellations when a booking ends; invites carry a SEQUENCE and fold long lines (#267) |
+
+## [1.20.0] - 2026-10-17
+
+Minor release. **Every timezone is now offered in every picker**, and slot pages say when the clocks change between today and the day shown, so a guest in Bucharest no longer has to pick a city that merely shares today's offset (#265). **Additional attendees now follow the booking**: their calendar copy moves when a reschedule is confirmed and is removed when the booking ends, and calendar invites carry a `SEQUENCE` so clients apply updates and cancellations in order (#267). The guest's phone and notes now survive every path that rebuilds a booking (#261, #266), and OIDC sign-in failures log why the provider's response did not parse, without logging tokens or personal data (#264). Two migrations (071 and 072), no configuration change. **Back up your database before upgrading.**
+
+Thanks to @Codrax and @Piergeek for the reports.
+
+### Added
+
+- **Every timezone in every picker** (#265) - Profile & Settings, the event type form, the booking page's timezone picker and the reschedule page offered 21 zones, plus the guest's detected one only when it happened to be passed along, so `Europe/Bucharest` appeared on one load and not the next. Every picker now lists the common zones first, then every IANA zone grouped by region, labelled by city ("Bucharest (UTC+3)", "Buenos Aires, Argentina (UTC-3)"). Old alias names (`Europe/Kiev`, `US/Eastern`) are hidden, but a saved or detected value is always offered, so it is never lost. It is still a native dropdown: typing a city name jumps to it. Reported by @Codrax.
+- **Clock-change note on slot pages** (#265) - The offset in the timezone label is today's, which looked wrong on dates past a daylight saving change. When the day shown uses a different offset, the slot page now says so, in the page language: "Times on Mon 26 are UTC+2 (clocks change on 25 October)" in the month view, "Clocks change on 25 October: from then on, times are UTC+2" in the week and column views.
+- **Additional attendees follow reschedules and cancellations** (#267) - A guest's additional attendees got the invite when the booking was confirmed and nothing after that: a reschedule left their copy at the old time, and a cancellation left it in their calendar for good. They now get an update moving their copy when a reschedule is confirmed (straight away, or when the host approves it), and a cancellation removing it whenever a confirmed booking ends (guest or host cancel, decline, expiry, `calrs booking cancel`, or a sync that finds the host's event deleted). Attendees of a request that was never confirmed hear nothing, as before. Attendee emails never show the guest's phone, resource names or the cancellation reason, and a watcher who claimed the booking reads them in their own language.
+- **OIDC token response diagnostics** (#264) - When the provider's token response fails to parse, the error log now says where and why, plus its shape: keys and value types, the ID token's segment count, its header algorithm and key id, and its claim names and types. Values are never logged: quoted values in the parser's message are masked, and the line is capped. Other OIDC failures, discovery included, now log their full cause instead of "Failed to parse server response". Reported by @Codrax.
+
+### Changed
+
+- **Calendar invites carry a `SEQUENCE`** (#267) - calrs never sent one, so calendar clients could not tell an update from an older copy. Every invite now carries the booking's sequence, raised by each guest reschedule and by ending a confirmed booking, so a cancellation always supersedes the copy a client holds.
+- **Calendar invites fold long lines** (#267) - Lines longer than 75 octets are folded as RFC 5545 requires, which strict parsers expect now that descriptions carry the guest's phone and notes. Everything calrs reads back unfolds them, including folded lines other servers already sent.
+- **Approving a reschedule says so** (#267) - Approving a guest's reschedule of a booking that was already confirmed sends the guest "the new time of your booking is confirmed" with the updated invite, and texts "moved" instead of "confirmed". Watchers are no longer offered the booking for claiming again.
+- **A declined or expired reschedule says the original booking is cancelled too** (#267) - The booking really is declined, and the guest's email now says so and removes their old copy from the calendar.
+
+### Upgrade notes
+
+- **Back up the database before upgrading.** Migrations 071 and 072 add columns and triggers; an older binary does not know them, so to roll back restore the pre-upgrade backup along with the old binary.
+- Migration 071 records when each booking was first confirmed, so attendees get the "you've been added" email exactly once. Confirmed bookings, and pending ones with a trace of an earlier confirmation (a meeting link, a watcher claim, a write-back record), are backfilled. A booking awaiting approval of a reschedule at upgrade time with none of those traces is treated as a new request: its attendees get the "added" email once more on approval, and the guest is texted "confirmed".
+- Migration 072 adds the invite sequence. Existing bookings start at 0, which is what clients assume for the invites they already hold.
+
+### Fixed
+
+- **Guest phone and notes lost after approval** (#261) - The "Booking confirmed" email sent after a host approved a request dropped the guest's phone and notes, which the dashboard and the approval email showed. Approval, reschedule, Google Meet copies and claims now keep them, and additional attendees are kept through approval and reschedule. Reported by @Piergeek.
+- **More paths that dropped the phone and notes** (#266) - A calendar write-back that succeeded on retry wrote the event without the guest's phone; a reschedule needing approval sent the host a request with neither phone nor notes, and the guest a pending notice without their notes; and the guest's own reschedule invite dropped the attendee list and notes. All now carry them, through shared helpers instead of hand-written copies that had drifted.
+- **Attendees were emailed on every approval** (#266) - Since #261, additional attendees got a fresh "you've been added" email each time a booking was approved, including the approval of a reschedule. They now get it once.
+- **Backslashes broke calendar descriptions** (#266) - A backslash in the guest's notes (`C:\new folder`) was not escaped in the invite, so clients read part of it as a line break.
+- **Phone label in the wrong language** (#266) - A claimed or collective booking labelled the phone in each calendar copy in one host's language; each copy now uses its owner's.
+- **Settings could replace a saved timezone with Pacific/Midway** (#265) - A timezone saved from the dashboard banner but missing from the short list was not preselected in Profile & Settings, so the next save stored the first option. A timezone field you do not touch is now kept as stored, and editing an event type without its own timezone keeps it following your profile instead of pinning it.
+- **The host's name was not escaped in the cancellation email** - A host cancelling a booking put their display name into the guest email's HTML unescaped.
+- **Concurrent cancellations** - `calrs booking cancel` and the guest cancel link now only cancel a booking still in the state they read, so a cancellation racing another action no longer emails everyone twice.
 
 ## [1.19.0] - 2026-10-11
 
