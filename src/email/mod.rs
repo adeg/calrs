@@ -201,6 +201,9 @@ pub struct RescheduleDetails {
     pub host_language: Option<String>,
     /// SEQUENCE of the moved invite. See `BookingDetails::sequence`.
     pub sequence: u32,
+    /// Listed in the guest's moved invite, as in their confirmation: the
+    /// higher SEQUENCE replaces that copy whole (#267).
+    pub additional_attendees: Vec<String>,
 }
 
 #[cfg(test)]

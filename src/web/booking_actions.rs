@@ -2128,6 +2128,7 @@ pub(super) async fn guest_reschedule_booking(
                 guest_language: booking_language.clone(),
                 host_language: host_language.clone(),
                 sequence: booking_ics_sequence(&state.pool, &uid).await,
+                additional_attendees: Vec::new(),
             };
 
             // Send guest pending notice with new tokens
@@ -2269,6 +2270,10 @@ pub(super) async fn guest_reschedule_booking(
                 guest_language: booking_language,
                 host_language,
                 sequence: push_details.sequence,
+                // The guest's moved invite replaces their confirmation one
+                // whole, so it keeps its attendees and notes (#267).
+                notes: push_details.notes.clone(),
+                additional_attendees: push_details.additional_attendees.clone(),
                 ..Default::default()
             };
             spawn_emails(async move {

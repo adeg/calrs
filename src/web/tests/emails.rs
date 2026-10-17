@@ -1282,6 +1282,7 @@ async fn a_reschedule_moves_the_attendees_copy_once_confirmed() {
             &[
                 ("guest_phone", Some("+33612345678".to_string())),
                 ("language", Some("fr".to_string())),
+                ("notes", Some("Bring the quote".to_string())),
             ],
         )
         .await;
@@ -1341,6 +1342,14 @@ async fn a_reschedule_moves_the_attendees_copy_once_confirmed() {
             continue;
         }
         assert!(guest.contains("SEQUENCE:1"), "{guest}");
+        // The guest's moved invite replaces their confirmation one whole:
+        // it keeps the attendees and the notes, never the phone.
+        assert!(
+            guest.contains("ATTENDEE;RSVP=TRUE:mailto:friend-direct@test.com"),
+            "{guest}"
+        );
+        assert!(guest.contains("DESCRIPTION:Bring the quote"), "{guest}");
+        assert!(!guest.contains("+33612345678"), "{guest}");
         let attendee = mail_to(&mails, "friend-direct@test.com").await;
         // In the booking's language, with the old time, and the invite that
         // replaces the copy they hold.

@@ -1166,10 +1166,13 @@ pub async fn send_guest_reschedule_notification(
         host_name: details.host_name.clone(),
         host_email: details.host_email.clone(),
         uid: details.uid.clone(),
-        notes: None,
+        // The guest's confirmation invite listed the additional attendees
+        // and carried the notes; this one replaces it, so it does too (#267).
+        // Never the phone: email invites leave it out (`generate_ics_impl`).
+        notes: details.notes.clone(),
         location: details.location.clone(),
         reminder_minutes: None,
-        additional_attendees: vec![],
+        additional_attendees: details.additional_attendees.clone(),
         sequence: details.sequence,
         ..Default::default()
     };
