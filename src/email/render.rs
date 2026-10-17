@@ -142,9 +142,14 @@ pub(super) fn build_multipart_body(plain: &str, html: &str) -> MultiPart {
 // --- ICS generation ---
 
 /// Sanitize a value for use in an ICS field.
-/// Strips CR/LF to prevent ICS injection (RFC 5545 field breakout).
+/// Strips CR/LF to prevent ICS injection (RFC 5545 field breakout), and
+/// escapes the TEXT specials of RFC 5545 §3.3.11. The backslash goes first:
+/// left raw, `C:\new folder` reads as a line break and `a\;b` as an escaped
+/// semicolon (#266). Callers join already-sanitized pieces with a literal
+/// `\n`, which is why that separator is never passed through here.
 pub(super) fn sanitize_ics(value: &str) -> String {
     value
+        .replace('\\', "\\\\")
         .replace('\r', "")
         .replace('\n', " ")
         .replace(';', "\\;")
@@ -177,6 +182,34 @@ pub(super) fn sanitize_ics_param(value: &str) -> String {
     } else {
         escaped
     }
+}
+
+/// Fold every content line longer than 75 octets (RFC 5545 §3.1): the line
+/// is broken with CRLF followed by a single space, and the space counts
+/// towards the next line's 75. Breaks fall on UTF-8 character boundaries, so
+/// an accented name or an em dash in a SUMMARY is never split mid-character.
+/// Applied once to the whole output of each generator, after every line is
+/// assembled, so no field can be forgotten. Strict parsers reject unfolded
+/// lines, and DESCRIPTION grows with the guest phone and notes (#267).
+pub fn fold_ics(ics: &str) -> String {
+    const MAX: usize = 75;
+    let mut out = String::with_capacity(ics.len() + ics.len() / MAX * 3);
+    for (i, line) in ics.split("\r\n").enumerate() {
+        if i > 0 {
+            out.push_str("\r\n");
+        }
+        let mut width = 0;
+        for c in line.chars() {
+            let len = c.len_utf8();
+            if width + len > MAX {
+                out.push_str("\r\n ");
+                width = 1;
+            }
+            out.push(c);
+            width += len;
+        }
+    }
+    out
 }
 
 /// Convert date + start/end times from a guest timezone to UTC ICS format (YYYYMMDDTHHMMSSZ).
@@ -449,7 +482,7 @@ fn generate_ics_impl(
             &details.guest_timezone,
         )
     });
-    format!(
+    fold_ics(&format!(
         "BEGIN:VCALENDAR\r\n\
          VERSION:2.0\r\n\
          PRODID:-//calrs//calrs//EN\r\n\
@@ -457,6 +490,7 @@ fn generate_ics_impl(
          BEGIN:VEVENT\r\n\
          UID:{uid}\r\n\
          DTSTAMP:{dtstamp}\r\n\
+         SEQUENCE:{sequence}\r\n\
          DTSTART:{dtstart}\r\n\
          DTEND:{dtend}\r\n\
          SUMMARY:{summary}\r\n\
@@ -476,6 +510,7 @@ fn generate_ics_impl(
         },
         uid = details.uid,
         dtstamp = dtstamp,
+        sequence = details.sequence,
         dtstart = dtstart,
         dtend = dtend,
         summary = summary,
@@ -486,7 +521,7 @@ fn generate_ics_impl(
         guest_name = guest_name,
         guest_email = guest_email,
         additional_attendee_lines = additional_attendee_lines,
-    )
+    ))
 }
 
 /// Generate an .ics VCALENDAR for cancellation (METHOD:CANCEL)
@@ -502,6 +537,13 @@ pub(super) fn generate_cancel_ics(details: &CancellationDetails) -> String {
     let guest_name = sanitize_ics_param(&details.guest_name);
     let host_email = sanitize_ics(&details.host_email);
     let guest_email = sanitize_ics(&details.guest_email);
+    // RFC 5546 3.2.5: a CANCEL names the attendees it removes the event for,
+    // here everyone the invite listed (#267).
+    let additional_attendee_lines: String = details
+        .additional_attendees
+        .iter()
+        .map(|email| format!("ATTENDEE:mailto:{}\r\n", sanitize_ics(email)))
+        .collect();
     let dtstamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let (dtstart, dtend) = details.utc_times.clone().unwrap_or_else(|| {
         convert_to_utc(
@@ -511,7 +553,7 @@ pub(super) fn generate_cancel_ics(details: &CancellationDetails) -> String {
             &details.guest_timezone,
         )
     });
-    format!(
+    fold_ics(&format!(
         "BEGIN:VCALENDAR\r\n\
          VERSION:2.0\r\n\
          PRODID:-//calrs//calrs//EN\r\n\
@@ -519,16 +561,19 @@ pub(super) fn generate_cancel_ics(details: &CancellationDetails) -> String {
          BEGIN:VEVENT\r\n\
          UID:{uid}\r\n\
          DTSTAMP:{dtstamp}\r\n\
+         SEQUENCE:{sequence}\r\n\
          DTSTART:{dtstart}\r\n\
          DTEND:{dtend}\r\n\
          SUMMARY:{summary}\r\n\
          ORGANIZER;CN={host_name}:mailto:{host_email}\r\n\
          ATTENDEE;CN={guest_name}:mailto:{guest_email}\r\n\
+         {additional_attendee_lines}\
          STATUS:CANCELLED\r\n\
          END:VEVENT\r\n\
          END:VCALENDAR\r\n",
         uid = details.uid,
         dtstamp = dtstamp,
+        sequence = details.sequence,
         dtstart = dtstart,
         dtend = dtend,
         summary = summary,
@@ -536,7 +581,8 @@ pub(super) fn generate_cancel_ics(details: &CancellationDetails) -> String {
         host_email = host_email,
         guest_name = guest_name,
         guest_email = guest_email,
-    )
+        additional_attendee_lines = additional_attendee_lines,
+    ))
 }
 
 // --- Composition shared by the translated emails ---
@@ -699,6 +745,7 @@ pub(super) async fn send_composed(
 
 /// Subject and bodies of an email, built apart from sending so tests can
 /// read exactly what the recipient would get.
+#[derive(Clone)]
 pub(super) struct ComposedEmail {
     pub(super) subject: String,
     pub(super) plain: String,

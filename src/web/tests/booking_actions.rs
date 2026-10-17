@@ -1458,3 +1458,52 @@ async fn guest_reschedule_post_honours_availability_overrides() {
         "13:00 is inside the override's custom hours"
     );
 }
+
+/// #267: the guest cancel reads the booking, then cancels it. When an
+/// approval or a reschedule lands in between, whether the cancellation ends
+/// a reschedule awaiting approval must follow the status the booking
+/// actually left, not the one read first.
+#[tokio::test]
+async fn guest_cancel_reports_the_status_it_actually_left() {
+    let (_app, pool, _session, et_id) = setup_test_app().await;
+    let start = Utc::now() + Duration::days(20);
+    // Read as pending, approved since.
+    let approved =
+        insert_v1_booking(&pool, &et_id, "a@test.com", start, 30, "confirmed", &[]).await;
+    assert_eq!(
+        cancel_from_status(&pool, &approved, "pending")
+            .await
+            .as_deref(),
+        Some("confirmed")
+    );
+    assert_eq!(booking_status(&pool, &approved).await, "cancelled");
+    // Read as confirmed, sent back to pending by a reschedule since.
+    let moved = insert_v1_booking(
+        &pool,
+        &et_id,
+        "m@test.com",
+        start + Duration::hours(2),
+        30,
+        "pending",
+        &[],
+    )
+    .await;
+    assert_eq!(
+        cancel_from_status(&pool, &moved, "confirmed")
+            .await
+            .as_deref(),
+        Some("pending")
+    );
+    // Already over: nothing to cancel, nothing changed.
+    assert_eq!(
+        cancel_from_status(&pool, &approved, "confirmed").await,
+        None
+    );
+    sqlx::query("UPDATE bookings SET status = 'declined' WHERE id = ?")
+        .bind(&moved)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(cancel_from_status(&pool, &moved, "pending").await, None);
+    assert_eq!(booking_status(&pool, &moved).await, "declined");
+}

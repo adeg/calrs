@@ -204,6 +204,9 @@ pub fn expand_rrule(
 /// and RECURRENCE-ID values from any override VEVENTs (modified instances).
 pub fn extract_exdates(raw_ical: &str) -> Vec<NaiveDateTime> {
     let mut exdates = Vec::new();
+    // A long EXDATE list is folded over several lines.
+    let unfolded = crate::utils::unfold_ical(raw_ical);
+    let raw_ical: &str = &unfolded;
 
     // Extract EXDATEs from the first VEVENT (the one with the RRULE)
     if let Some(vevent_start) = raw_ical.find("BEGIN:VEVENT") {
@@ -809,6 +812,15 @@ mod tests {
             "BEGIN:VEVENT\nEXDATE:20260309T100000,20260316T100000,20260323T100000\nEND:VEVENT";
         let exdates = extract_exdates(ical);
         assert_eq!(exdates.len(), 3);
+    }
+
+    /// #267: a long EXDATE list arrives folded over several lines.
+    #[test]
+    fn test_extract_exdates_folded() {
+        let ical = "BEGIN:VEVENT\r\nEXDATE:20260309T100000,2026031\r\n 6T100000,20260323T100000\r\nEND:VEVENT";
+        let exdates = extract_exdates(ical);
+        assert_eq!(exdates.len(), 3);
+        assert_eq!(exdates[1], dt(2026, 3, 16, 10, 0));
     }
 
     // --- week_start ---
