@@ -243,10 +243,11 @@ async fn a_confirmed_booking_emails_its_attendees_at_submit() {
 
 /// #266: both approval paths now carry the attendees, so approving a guest
 /// reschedule of a booking they had already been told about sent them the
-/// "you've been added" email again. A reschedule that needs no approval
-/// sends them nothing, and neither does its approval.
+/// "you've been added" email again. #267: they get the move instead, once,
+/// with the invite under the same UID and the bumped SEQUENCE, so their
+/// calendar moves the copy they hold.
 #[tokio::test]
-async fn approving_a_reschedule_does_not_email_the_attendees_again() {
+async fn approving_a_reschedule_moves_the_attendees_copy() {
     let _env = crate::test_support::ENV_LOCK.lock().await;
     let (app, pool, session, et_id) = setup_test_app().await;
     let (port, mails) = spawn_capturing_mta().await;
@@ -271,7 +272,7 @@ async fn approving_a_reschedule_does_not_email_the_attendees_again() {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("UPDATE bookings SET status = 'pending' WHERE id = ?")
+        sqlx::query("UPDATE bookings SET status = 'pending', ics_sequence = 1 WHERE id = ?")
             .bind(&id)
             .execute(&pool)
             .await
@@ -296,35 +297,19 @@ async fn approving_a_reschedule_does_not_email_the_attendees_again() {
         };
         assert!(response.status().is_success() || response.status().is_redirection());
 
-        // The guest's confirmation goes out, then the attendees' would, then
-        // the host's: once the host's has arrived, none went to the attendee.
         let guest = mail_to(&mails, &format!("{path}@test.com")).await;
         assert!(
             guest.contains(&format!("mailto:friend-{path}@test.com")),
             "{guest}"
         );
-        let host_mails = || {
-            mails
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|m| m.rcpt.iter().any(|r| r.contains("test@example.com")))
-                .count()
-        };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let expected = if via_dashboard { 2 } else { 1 };
-        while host_mails() < expected && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        assert_eq!(host_mails(), expected);
-        assert!(
-            !mails
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|m| m.rcpt.iter().any(|r| r.contains(&format!("friend-{path}")))),
-            "the attendee was emailed again on the {path} approval"
-        );
+        assert!(guest.contains("SEQUENCE:1"), "{guest}");
+        // One email to the attendee: the move, not "you've been added".
+        let attendee = mail_to(&mails, &format!("friend-{path}@test.com")).await;
+        assert!(attendee.contains("has moved to a new time"), "{attendee}");
+        assert!(!attendee.contains("added as an attendee"), "{attendee}");
+        assert!(attendee.contains("METHOD:REQUEST"), "{attendee}");
+        assert!(attendee.contains(&format!("UID:uid-{id}")), "{attendee}");
+        assert!(attendee.contains("SEQUENCE:1"), "{attendee}");
     }
 }
 
@@ -1258,4 +1243,161 @@ async fn approving_a_reschedule_texts_moved_not_confirmed() {
             );
         }
     }
+}
+
+/// #267: a guest reschedule that needs no approval told the guest and the
+/// host, never the additional attendees, whose copy kept the old time. They
+/// now get the move with the invite under the same UID and a SEQUENCE one
+/// higher, as the guest does. A reschedule awaiting approval tells them
+/// nothing yet: like the guest's, their copy stays at the confirmed time.
+#[tokio::test]
+async fn a_reschedule_moves_the_attendees_copy_once_confirmed() {
+    let _env = crate::test_support::ENV_LOCK.lock().await;
+    let (app, pool, _, et_id) = setup_test_app().await;
+    let (port, mails) = spawn_capturing_mta().await;
+    use_capturing_mta(&pool, port).await;
+    sqlx::query("UPDATE event_types SET sms_phone_mode = 'optional' WHERE id = ?")
+        .bind(&et_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The pending case first, while the host has had no other email.
+    for needs_approval in [true, false] {
+        sqlx::query("UPDATE event_types SET requires_confirmation = ? WHERE id = ?")
+            .bind(needs_approval)
+            .bind(&et_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let tag = if needs_approval { "pending" } else { "direct" };
+        let id = insert_v1_booking(
+            &pool,
+            &et_id,
+            &format!("moved-{tag}@test.com"),
+            Utc::now() + Duration::days(if needs_approval { 5 } else { 6 }),
+            30,
+            "confirmed",
+            &[
+                ("guest_phone", Some("+33612345678".to_string())),
+                ("language", Some("fr".to_string())),
+            ],
+        )
+        .await;
+        sqlx::query("INSERT INTO booking_attendees (id, booking_id, email) VALUES (?, ?, ?)")
+            .bind(format!("att-267-{tag}"))
+            .bind(&id)
+            .bind(format!("friend-{tag}@test.com"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let token: String =
+            sqlx::query_scalar("SELECT reschedule_token FROM bookings WHERE id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let csrf = "csrf-267-resched";
+        let time = if needs_approval { "11%3A00" } else { "10%3A00" };
+        let response = app
+            .clone()
+            .oneshot(post_form_unauthed(
+                &format!("/booking/reschedule/{}", token),
+                csrf,
+                &format!(
+                    "_csrf={}&date={}&time={}&tz=UTC",
+                    csrf,
+                    far_future_monday(),
+                    time
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+
+        let sequence: i64 = sqlx::query_scalar("SELECT ics_sequence FROM bookings WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sequence, 1, "the reschedule bumps the SEQUENCE");
+
+        let guest = mail_to(&mails, &format!("moved-{tag}@test.com")).await;
+        if needs_approval {
+            // The guest is told the request is pending; once the host's
+            // request has arrived too, nothing went to the attendee.
+            mail_to(&mails, "test@example.com").await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert!(
+                !mails
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m.rcpt.iter().any(|r| r.contains("friend-pending"))),
+                "a reschedule awaiting approval must not move the attendee's copy"
+            );
+            continue;
+        }
+        assert!(guest.contains("SEQUENCE:1"), "{guest}");
+        let attendee = mail_to(&mails, "friend-direct@test.com").await;
+        // In the booking's language, with the old time, and the invite that
+        // replaces the copy they hold.
+        assert!(attendee.contains("<html lang=\"fr\">"), "{attendee}");
+        assert!(
+            attendee.contains("Une r\u{e9}servation \u{e0} laquelle vous participez"),
+            "{attendee}"
+        );
+        assert!(attendee.contains("Pr\u{e9}c\u{e9}demment"), "{attendee}");
+        assert!(attendee.contains("METHOD:REQUEST"), "{attendee}");
+        assert!(attendee.contains(&format!("UID:uid-{id}")), "{attendee}");
+        assert!(attendee.contains("SEQUENCE:1"), "{attendee}");
+        assert!(attendee.contains("DTSTART:"), "{attendee}");
+        // Never the host's data.
+        assert!(!attendee.contains("+33612345678"), "{attendee}");
+    }
+}
+
+/// #267: the CANCEL for a booking that was moved carries the SEQUENCE its
+/// last invite had; a lower one is ignored by clients as out of date.
+#[tokio::test]
+async fn cancelling_a_moved_booking_sends_its_sequence() {
+    let _env = crate::test_support::ENV_LOCK.lock().await;
+    let (app, pool, _, et_id) = setup_test_app().await;
+    let (port, mails) = spawn_capturing_mta().await;
+    use_capturing_mta(&pool, port).await;
+    let id = insert_v1_booking(
+        &pool,
+        &et_id,
+        "cancel-moved@test.com",
+        Utc::now() + Duration::days(7),
+        30,
+        "confirmed",
+        &[],
+    )
+    .await;
+    sqlx::query("UPDATE bookings SET ics_sequence = 2 WHERE id = ?")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let token: String = sqlx::query_scalar("SELECT cancel_token FROM bookings WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let csrf = "csrf-267-cancel";
+    let response = app
+        .oneshot(post_form_unauthed(
+            &format!("/booking/cancel/{}", token),
+            csrf,
+            &format!("_csrf={}", csrf),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let guest = mail_to(&mails, "cancel-moved@test.com").await;
+    assert!(guest.contains("METHOD:CANCEL"), "{guest}");
+    assert!(guest.contains("SEQUENCE:2"), "{guest}");
 }

@@ -1073,6 +1073,7 @@ async fn booking_details_for_meet(
     // Meet copy cannot drift from the CalDAV one (#266).
     let (notes, guest_phone) = crate::web::booking_guest_input(pool, &uid).await;
     let additional_attendees = crate::web::booking_additional_attendees(pool, &uid).await;
+    let sequence = crate::web::booking_ics_sequence(pool, &uid).await;
 
     Some(crate::email::BookingDetails {
         utc_times,
@@ -1095,6 +1096,7 @@ async fn booking_details_for_meet(
         additional_attendees,
         host_language: crate::email::user_language(pool, owner_id).await,
         host_timezone: host_tz.to_string(),
+        sequence,
         ..Default::default()
     })
 }

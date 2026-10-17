@@ -1434,6 +1434,7 @@ email-claim-confirmed-subject = Broneering üle võetud: { $event }, { $guest } 
 email-claim-confirmed-footer = Sind lisatakse selle kohtumise osalejaks.
 email-attendee-greeting = Tere,
 email-attendee-message = Sind lisati broneeringu osalejaks.
+email-attendee-rescheduled-message = Broneering, milles sa osaled, on viidud uuele ajale.
 email-pick-new-time-subject = Aja muutmine: { $event }, vali palun uus aeg
 email-pick-new-time-message = { $host } peab sinu broneeringu aega muutma. Vali palun uus aeg.
 email-pick-new-time-link = Vali uus aeg: { $url }

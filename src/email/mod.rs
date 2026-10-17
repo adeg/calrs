@@ -135,6 +135,9 @@ pub struct BookingDetails {
     /// round-robin mode, attached resources in 'all' mode). Rendered in
     /// host-facing emails only; guests do not see internal resource names.
     pub resource_name: Option<String>,
+    /// SEQUENCE of the booking's invite (`bookings.ics_sequence`): 0 until a
+    /// reschedule moves it (#267).
+    pub sequence: u32,
 }
 
 #[derive(Clone, Default)]
@@ -157,6 +160,9 @@ pub struct CancellationDetails {
     pub host_language: Option<String>,
     /// Host's IANA timezone (from `users.timezone`). See `BookingDetails::host_timezone`.
     pub host_timezone: String,
+    /// See `BookingDetails::sequence`. A CANCEL below the copy's SEQUENCE is
+    /// ignored as out of date.
+    pub sequence: u32,
 }
 
 // --- Reschedule emails ---
@@ -193,6 +199,8 @@ pub struct RescheduleDetails {
     /// Host recipient's saved language (`users.language`). See
     /// `BookingDetails::host_language`.
     pub host_language: Option<String>,
+    /// SEQUENCE of the moved invite. See `BookingDetails::sequence`.
+    pub sequence: u32,
 }
 
 #[cfg(test)]

@@ -2092,3 +2092,37 @@ fn generated_ics_lines_fit_in_75_octets() {
     let notes = sanitize_ics(details.notes.as_deref().unwrap());
     assert!(description.ends_with(notes.trim_end()), "{description}");
 }
+
+/// #267: every invite and cancellation carries the booking's SEQUENCE, so
+/// a moved booking replaces the copy a client holds and its later CANCEL
+/// is not ignored as older than that copy.
+#[test]
+fn ics_carries_the_booking_sequence() {
+    let details = BookingDetails {
+        event_title: "Call".into(),
+        date: "2026-03-10".into(),
+        start_time: "09:00".into(),
+        end_time: "10:00".into(),
+        guest_timezone: "UTC".into(),
+        uid: "uid-267-seq".into(),
+        ..Default::default()
+    };
+    assert!(generate_ics(&details, "REQUEST").contains("\r\nSEQUENCE:0\r\n"));
+    let moved = BookingDetails {
+        sequence: 2,
+        ..details
+    };
+    assert!(generate_ics(&moved, "REQUEST").contains("\r\nSEQUENCE:2\r\n"));
+    assert!(generate_ics_caldav(&moved).contains("\r\nSEQUENCE:2\r\n"));
+    let cancel = CancellationDetails {
+        event_title: "Call".into(),
+        date: "2026-03-10".into(),
+        start_time: "09:00".into(),
+        end_time: "10:00".into(),
+        guest_timezone: "UTC".into(),
+        uid: "uid-267-seq".into(),
+        sequence: 2,
+        ..Default::default()
+    };
+    assert!(generate_cancel_ics(&cancel).contains("\r\nSEQUENCE:2\r\n"));
+}

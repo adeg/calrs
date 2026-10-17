@@ -166,10 +166,14 @@ Call sites use `crate::email::name` whatever file `name` lives in.
   `src/web/booking_actions.rs`; the same from the dashboard:
   `src/web/dashboard.rs`. Storage of times: `src/booking_time.rs`. Paths
   that rebuild `BookingDetails` from the row read what the guest typed
-  through `booking_guest_input` and `booking_additional_attendees`
-  (`src/web/calendar_push.rs`), not their own queries. A trigger stamps
-  `bookings.first_confirmed_at` (migration 071), so an approval can tell a
-  rescheduled booking from a new request.
+  through `booking_guest_input`, `booking_additional_attendees` and
+  `booking_ics_sequence` (`src/web/calendar_push.rs`), not their own
+  queries. A trigger stamps `bookings.first_confirmed_at` (migration 071),
+  so an approval can tell a rescheduled booking from a new request: it texts
+  "moved" and sends the attendees the moved invite instead of "added". A
+  reschedule bumps `bookings.ics_sequence` (migration 072), the SEQUENCE
+  every invite, CANCEL and push carries. ICS text is folded once per
+  generator by `fold_ics` (`src/email/render.rs`).
 - **Organizer snapshot** (`src/web/hosts.rs`, migration
   `070_booking_organizer.sql`). Multi-host bookings store the organizer they
   were created with, so a later push never changes the ICS organizer (Google

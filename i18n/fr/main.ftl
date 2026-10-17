@@ -1434,6 +1434,7 @@ email-claim-confirmed-subject = Réservation prise en charge : { $event }, { $gu
 email-claim-confirmed-footer = Vous serez ajouté comme participant à cette réunion.
 email-attendee-greeting = Bonjour,
 email-attendee-message = Vous avez été ajouté comme participant à une réservation.
+email-attendee-rescheduled-message = Une réservation à laquelle vous participez a été déplacée à un nouvel horaire.
 email-pick-new-time-subject = Reprogrammation : { $event }, merci de choisir un nouveau créneau
 email-pick-new-time-message = { $host } doit reprogrammer votre réservation. Merci de choisir un nouveau créneau.
 email-pick-new-time-link = Choisir un nouveau créneau : { $url }

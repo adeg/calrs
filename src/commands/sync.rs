@@ -1198,6 +1198,7 @@ async fn cancel_orphaned_booking(
 
     // The guest and the host each read the reason in their own language.
     let guest_language = crate::email::stored_booking_language(pool, &booking_id).await;
+    let sequence = crate::web::booking_ics_sequence(pool, &booking_uid).await;
     let details = crate::email::CancellationDetails {
         utc_times,
         event_title,
@@ -1216,6 +1217,7 @@ async fn cancel_orphaned_booking(
         cancelled_by_host: true,
         guest_language,
         host_timezone: host_timezone.unwrap_or_default(),
+        sequence,
         ..Default::default()
     };
     let host_details = crate::email::CancellationDetails {

@@ -883,6 +883,21 @@ pub(crate) async fn booking_additional_attendees(
     .unwrap_or_default()
 }
 
+/// The SEQUENCE of the booking's invite, bumped by each reschedule (#267).
+/// Every path that rebuilds an invite, a cancellation or a calendar push
+/// from the row reads it here, so a moved booking's copies update in place
+/// and its cancellation is not ignored as older than the copy it cancels.
+pub(crate) async fn booking_ics_sequence(pool: &SqlitePool, booking_uid: &str) -> u32 {
+    sqlx::query_scalar::<_, i64>("SELECT ics_sequence FROM bookings WHERE uid = ?")
+        .bind(booking_uid)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0)
+}
+
 /// Release one specific resource's reservation for a booking, fetched by
 /// id (used when a reschedule re-pick moves the booking off a resource the
 /// row no longer references).

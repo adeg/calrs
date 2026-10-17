@@ -490,6 +490,7 @@ fn generate_ics_impl(
          BEGIN:VEVENT\r\n\
          UID:{uid}\r\n\
          DTSTAMP:{dtstamp}\r\n\
+         SEQUENCE:{sequence}\r\n\
          DTSTART:{dtstart}\r\n\
          DTEND:{dtend}\r\n\
          SUMMARY:{summary}\r\n\
@@ -509,6 +510,7 @@ fn generate_ics_impl(
         },
         uid = details.uid,
         dtstamp = dtstamp,
+        sequence = details.sequence,
         dtstart = dtstart,
         dtend = dtend,
         summary = summary,
@@ -552,6 +554,7 @@ pub(super) fn generate_cancel_ics(details: &CancellationDetails) -> String {
          BEGIN:VEVENT\r\n\
          UID:{uid}\r\n\
          DTSTAMP:{dtstamp}\r\n\
+         SEQUENCE:{sequence}\r\n\
          DTSTART:{dtstart}\r\n\
          DTEND:{dtend}\r\n\
          SUMMARY:{summary}\r\n\
@@ -562,6 +565,7 @@ pub(super) fn generate_cancel_ics(details: &CancellationDetails) -> String {
          END:VCALENDAR\r\n",
         uid = details.uid,
         dtstamp = dtstamp,
+        sequence = details.sequence,
         dtstart = dtstart,
         dtend = dtend,
         summary = summary,
@@ -732,6 +736,7 @@ pub(super) async fn send_composed(
 
 /// Subject and bodies of an email, built apart from sending so tests can
 /// read exactly what the recipient would get.
+#[derive(Clone)]
 pub(super) struct ComposedEmail {
     pub(super) subject: String,
     pub(super) plain: String,

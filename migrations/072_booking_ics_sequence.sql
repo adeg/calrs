@@ -1,0 +1,10 @@
+-- The SEQUENCE of a booking's calendar invite (#267).
+--
+-- RFC 5545 section 3.8.7.4 asks for SEQUENCE to grow each time an event
+-- moves, and RFC 5546 has a calendar client apply a REQUEST or CANCEL only
+-- when its SEQUENCE is not lower than the copy it holds. A guest reschedule
+-- bumps it; every invite, cancellation and calendar push then carries the
+-- current value, so a moved booking updates the guest's and the
+-- attendees' copies in place and a later cancellation is not ignored as
+-- out of date.
+ALTER TABLE bookings ADD COLUMN ics_sequence INTEGER NOT NULL DEFAULT 0;

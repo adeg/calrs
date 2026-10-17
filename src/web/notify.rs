@@ -374,6 +374,7 @@ async fn send_due_reminders(pool: SqlitePool, secret_key: [u8; 32]) {
             host_language: crate::email::supported_language(host_language.clone()),
             host_timezone: stored_tz_str.to_string(),
             resource_name: booking_resource_label(&pool, uid).await,
+            sequence: booking_ics_sequence(&pool, uid).await,
         };
 
         let guest_cancel_url = cancel_token.as_ref().and_then(|t| {

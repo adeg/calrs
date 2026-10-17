@@ -310,8 +310,12 @@ fn guest_emails_use_the_host_sender_and_host_emails_do_not() {
                 !body.contains("Sender::Instance") && !body.contains("Message::builder"),
                 "{name} is guest-facing but can build a message not sent as the host"
             );
-            // Thin wrappers delegate to the `_ex` variant.
-            let delegates = body.contains(&format!("{name}_ex("));
+            // Thin wrappers delegate to the `_ex` variant, or to another
+            // guest-facing sender, which this loop checks in turn.
+            let delegates = body.contains(&format!("{name}_ex("))
+                || body
+                    .match_indices("send_guest_")
+                    .any(|(at, _)| !body[at..].starts_with(&format!("{name}(")));
             assert!(
                 !senders.is_empty() || delegates,
                 "{name} is guest-facing but sends nothing as the host"

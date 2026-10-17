@@ -209,13 +209,43 @@ pub async fn send_guest_confirmation_ex(
 
 /// "You've been added as an attendee", with the invite attached, to each of
 /// the booking's additional attendees. Sent once, when the booking first
-/// becomes confirmed: at submit, or at the approval of a new request. Not on
-/// the approval of a reschedule, which tells them no more than a reschedule
-/// that needs no approval does (#266). Kept apart from the guest's own
-/// confirmation, which every approval sends.
+/// becomes confirmed: at submit, or at the approval of a new request (#266).
+/// A reschedule sends them `send_guest_attendee_reschedule` instead (#267).
+/// Kept apart from the guest's own confirmation, which every approval sends.
 pub async fn send_guest_attendee_confirmations(
     config: &SmtpConfig,
     details: &BookingDetails,
+) -> Result<()> {
+    send_guest_attendee_copies(config, details, compose_attendee_confirmation(details)).await
+}
+
+/// "A booking you attend has moved", with the updated invite, to each of the
+/// booking's additional attendees (#267). Sent when the new time becomes
+/// confirmed: at a reschedule that needs no approval, or at the approval of
+/// one. The invite keeps the booking's UID with the SEQUENCE the reschedule
+/// bumped, so their calendar moves the copy they hold instead of adding a
+/// second one. A reschedule awaiting approval tells them nothing, like the
+/// guest, whose copy also stays at the confirmed time until then.
+/// `previous` is the old date and time range, when the caller still has it.
+pub async fn send_guest_attendee_reschedule(
+    config: &SmtpConfig,
+    details: &BookingDetails,
+    previous: Option<(&str, &str)>,
+) -> Result<()> {
+    send_guest_attendee_copies(
+        config,
+        details,
+        compose_attendee_reschedule(details, previous),
+    )
+    .await
+}
+
+/// One copy of `mail` per additional attendee, each with the invite. A
+/// refused address is logged and does not stop the others.
+async fn send_guest_attendee_copies(
+    config: &SmtpConfig,
+    details: &BookingDetails,
+    mail: ComposedEmail,
 ) -> Result<()> {
     for attendee_email in &details.additional_attendees {
         let to2: Mailbox = attendee_email.parse()?;
@@ -224,12 +254,12 @@ pub async fn send_guest_attendee_confirmations(
             config,
             Sender::host_of(details),
             to2,
-            compose_attendee_confirmation(details),
+            mail.clone(),
             Some(("invite.ics", ics2, "REQUEST")),
         )
         .await
         {
-            tracing::warn!(attendee = %attendee_email, error = format!("{e:#}"), "failed to send attendee confirmation");
+            tracing::warn!(attendee = %attendee_email, error = format!("{e:#}"), "failed to send attendee email");
         }
     }
 
@@ -271,6 +301,54 @@ pub(super) fn compose_attendee_confirmation(details: &BookingDetails) -> Compose
         plain_lines: vec![],
         footer_plain: Some(t(lang, "email-confirm-ics-attached-plain")),
         footer_html: Some(t(lang, "email-confirm-ics-attached-html")),
+        actions: vec![],
+    }
+    .compose()
+}
+
+/// The attendees' copy of a reschedule, in the booking's language. Shows
+/// what their "you've been added" email showed, at the new time: never the
+/// guest phone or a resource name, which are the host's.
+pub(super) fn compose_attendee_reschedule(
+    details: &BookingDetails,
+    previous: Option<(&str, &str)>,
+) -> ComposedEmail {
+    let lang = guest_lang(details);
+    let time_display = format!(
+        "{} \u{2013} {} ({})",
+        details.start_time, details.end_time, details.guest_timezone
+    );
+    let mut rows = vec![row(t(lang, "confirmed-detail-event"), &details.event_title)];
+    if let Some((date, time)) = previous {
+        rows.push(row(
+            t(lang, "email-detail-previous"),
+            date_at_time(lang, date, time),
+        ));
+    }
+    rows.extend([
+        row(t(lang, "email-detail-new-date"), &details.date),
+        row(t(lang, "email-detail-new-time"), time_display),
+        row(t(lang, "email-detail-organizer"), &details.host_name),
+        row(
+            t(lang, "email-detail-booked-by"),
+            format!("{} <{}>", details.guest_name, details.guest_email),
+        ),
+    ]);
+    EmailParts {
+        lang,
+        // Neutral subject: Exchange uses it as the appointment title (#157).
+        subject: ta(
+            lang,
+            "email-confirm-subject",
+            [("event", &details.event_title), ("date", &details.date)],
+        ),
+        heading: t(lang, "email-attendee-greeting"),
+        message: t(lang, "email-attendee-rescheduled-message"),
+        accent: "#d97706",
+        rows,
+        plain_lines: vec![],
+        footer_plain: Some(t(lang, "email-rescheduled-ics-attached-plain")),
+        footer_html: Some(t(lang, "email-rescheduled-ics-attached-html")),
         actions: vec![],
     }
     .compose()
@@ -1092,6 +1170,7 @@ pub async fn send_guest_reschedule_notification(
         location: details.location.clone(),
         reminder_minutes: None,
         additional_attendees: vec![],
+        sequence: details.sequence,
         ..Default::default()
     };
     let ics = generate_ics(&booking_details, "REQUEST");

@@ -335,6 +335,7 @@ pub(super) async fn writeback_details(
         guest_language,
         host_language,
         host_timezone: stored_tz.name().to_string(),
+        sequence: super::booking_ics_sequence(pool, booking_uid).await,
         ..Default::default()
     };
     Some((details, owner_id.unwrap_or_default()))

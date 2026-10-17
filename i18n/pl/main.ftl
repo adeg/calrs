@@ -1458,6 +1458,7 @@ email-claim-confirmed-subject = Rezerwacja przejęta: { $event }, { $guest } ({ 
 email-claim-confirmed-footer = Zostaniesz dodany jako uczestnik tego spotkania.
 email-attendee-greeting = Cześć,
 email-attendee-message = Dodano Cię jako uczestnika rezerwacji.
+email-attendee-rescheduled-message = Termin rezerwacji, w której uczestniczysz, został zmieniony.
 email-pick-new-time-subject = Zmiana terminu: { $event }, wybierz nowy termin
 email-pick-new-time-message = { $host } musi zmienić termin Twojej rezerwacji. Wybierz nowy termin.
 email-pick-new-time-link = Wybierz nowy termin: { $url }

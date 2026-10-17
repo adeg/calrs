@@ -496,6 +496,7 @@ pub async fn run(pool: &SqlitePool, key: &[u8; 32], cmd: BookingCommands) -> Res
                                 "00:00"
                             };
 
+                            let sequence = crate::web::booking_ics_sequence(pool, &uid).await;
                             let details = crate::email::CancellationDetails {
                                 utc_times,
                                 event_title,
@@ -516,6 +517,7 @@ pub async fn run(pool: &SqlitePool, key: &[u8; 32], cmd: BookingCommands) -> Res
                                 .await,
                                 host_language: crate::email::supported_language(host_language),
                                 host_timezone: host_timezone.unwrap_or_default(),
+                                sequence,
                             };
 
                             print!(

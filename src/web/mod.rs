@@ -49,7 +49,9 @@ use branding::*;
 pub(crate) use calendar_push::caldav_delete_booking;
 pub(crate) use calendar_push::resource_delete_booking;
 use calendar_push::*;
-pub(crate) use calendar_push::{booking_additional_attendees, booking_guest_input};
+pub(crate) use calendar_push::{
+    booking_additional_attendees, booking_guest_input, booking_ics_sequence,
+};
 use dashboard::*;
 use event_types::*;
 use format::*;

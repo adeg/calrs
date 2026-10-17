@@ -1214,6 +1214,7 @@ pub(super) async fn cancel_booking(
         booking_strings_in_guest_tz(&start_at, &end_at, stored_tz, guest_tz_parsed);
     let reason = form.reason.filter(|r| !r.trim().is_empty());
 
+    let sequence = booking_ics_sequence(&state.pool, &uid).await;
     // Built before the SMTP block so the SMS path can borrow the same strings:
     // an SMS must never disagree with the email it accompanies.
     let details = crate::email::CancellationDetails {
@@ -1236,6 +1237,7 @@ pub(super) async fn cancel_booking(
         guest_language,
         host_language: crate::email::supported_language(user.language.clone()),
         host_timezone: stored_tz.name().to_string(),
+        sequence,
     };
 
     // The guest's copy names the host the invite named, whoever clicked:
@@ -1532,6 +1534,7 @@ pub(super) async fn confirm_booking(
         host_language,
         host_timezone: stored_tz.name().to_string(),
         resource_name: booking_resource_label(&state.pool, &uid).await,
+        sequence: booking_ics_sequence(&state.pool, &uid).await,
     };
 
     // Push to CalDAV calendar
@@ -1602,7 +1605,16 @@ pub(super) async fn confirm_booking(
                 "guest_confirmation",
                 &details.uid,
             );
-            if !reschedule_approval {
+            // The attendees heard about the booking when it was first
+            // confirmed; an approved reschedule moves their copy (#267).
+            if reschedule_approval {
+                log_email_result(
+                    crate::email::send_guest_attendee_reschedule(&smtp_config, &details, None)
+                        .await,
+                    "attendee_reschedule",
+                    &details.uid,
+                );
+            } else {
                 log_email_result(
                     crate::email::send_guest_attendee_confirmations(&smtp_config, &details).await,
                     "attendee_confirmation",

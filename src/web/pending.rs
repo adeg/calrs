@@ -257,7 +257,8 @@ pub(super) async fn pending_host_recipients(
 /// a guest reschedule awaiting approval rather than a new booking. Read
 /// before the approval flips the status, which stamps `first_confirmed_at`.
 /// Its additional attendees were emailed when it was first confirmed, so
-/// approving the new time does not email them again (#266).
+/// approving the new time sends them the move rather than "added" (#266,
+/// #267), and the guest is texted "moved".
 pub(super) async fn was_confirmed_before(pool: &SqlitePool, booking_id: &str) -> bool {
     sqlx::query_scalar::<_, bool>(
         "SELECT first_confirmed_at IS NOT NULL FROM bookings WHERE id = ?",
@@ -410,6 +411,7 @@ async fn notify_pending_expired(
         guest_language,
         host_language: None,
         host_timezone: stored_tz.name().to_string(),
+        sequence: booking_ics_sequence(pool, &uid).await,
     };
 
     if let Some(smtp_config) = smtp_config {
