@@ -985,9 +985,12 @@
   // UTC offset note (#265). The picker labels each zone with today's
   // offset, so on a day past a clock change the label is an hour off. These
   // helpers find that case and say so above the times. Offsets are read in
-  // en-US, whose shortOffset reads "GMT+2", and shown as "UTC+2" like the
-  // picker. A browser without shortOffset support shows no note.
+  // en-US, whose shortOffset reads "GMT+2" (plain "GMT" at zero), and shown
+  // as "UTC+2", "UTC+0" like the picker labels. A browser without
+  // shortOffset support shows no note. English dates use en-GB, so the
+  // change day reads "25 October".
   var pageLang = calData.lang || 'en';
+  if (pageLang === 'en') pageLang = 'en-GB';
   var offsetFmt = null;
   try {
     offsetFmt = new Intl.DateTimeFormat('en-US', { timeZone: guestTz || 'UTC', timeZoneName: 'shortOffset' });
@@ -996,9 +999,16 @@
   function offsetAt(ms) {
     var parts = offsetFmt.formatToParts(new Date(ms));
     for (var i = 0; i < parts.length; i++) {
-      if (parts[i].type === 'timeZoneName') return parts[i].value.replace('GMT', 'UTC');
+      if (parts[i].type === 'timeZoneName') return normalizeOffset(parts[i].value);
     }
     return '';
+  }
+
+  // "GMT+2" -> "UTC+2"; "GMT", "GMT+0", "UTC" -> "UTC+0", as the server
+  // labels a zone at zero offset.
+  function normalizeOffset(label) {
+    var s = label.replace(/^(GMT|UTC)/, 'UTC');
+    return /^UTC([+-]0(:00)?)?$/.test(s) ? 'UTC+0' : s;
   }
 
   function offsetMinutes(label) {
@@ -1054,9 +1064,12 @@
   }
 
   // Note for one selected day (month view). The day reads like the panel
-  // title just above it ("Mon 26").
+  // title just above it ("Mon 26"). On the change day itself the times
+  // before the change keep the old offset, so that day gets the range
+  // wording ("Clocks change on 25 October: from then on...").
   function dayOffsetNote(ds) {
     var c = offsetChange([ds]);
+    if (c && c.change === ds) return rangeNoteText(c);
     if (!c || !i18n.offsetNoteDay) return '';
     var weekday = dayLabels[new Date(utcNoon(ds)).getUTCDay()];
     return i18n.offsetNoteDay
@@ -1065,12 +1078,17 @@
       .replace('%3', changeLabel(c));
   }
 
-  // Note for a range of days (week and column views), from its first day
-  // with times that is past a change.
+  function rangeNoteText(c) {
+    if (!i18n.offsetNoteRange) return '';
+    return i18n.offsetNoteRange.replace('%1', changeLabel(c)).replace('%2', c.offset);
+  }
+
+  // Note for a range of days (week and column views). Both pass only their
+  // days with times, so the note follows the first bookable day past a
+  // change, as the month view does for the selected day.
   function rangeOffsetNote(dates) {
     var c = offsetChange(dates);
-    if (!c || !i18n.offsetNoteRange) return '';
-    return i18n.offsetNoteRange.replace('%1', changeLabel(c)).replace('%2', c.offset);
+    return c ? rangeNoteText(c) : '';
   }
 
   function prependOffsetNote(container, text) {
@@ -1688,6 +1706,7 @@
       html += '</div>';
     }
     columnViewEl.innerHTML = html;
+    // `dates` holds only the days with times, the same rule as the week view.
     prependOffsetNote(columnViewEl, rangeOffsetNote(dates.map(function(d) { return d.dateStr; })));
   }
 

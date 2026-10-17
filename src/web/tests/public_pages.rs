@@ -434,6 +434,24 @@ async fn public_slots_page_returns_200() {
     );
 }
 
+/// #265: the clock-change note is computed by the slot page's script, and
+/// the suite has no JavaScript runner, so this pins the rules review asked
+/// for in the source itself.
+#[test]
+fn slots_offset_note_script_keeps_its_rules() {
+    let src = std::fs::read_to_string("templates/slots.html").unwrap();
+    // English change dates read "25 October", not "October 25".
+    assert!(src.contains("if (pageLang === 'en') pageLang = 'en-GB';"));
+    // On the change day itself, slots before the change keep the old
+    // offset, so that day gets the range wording.
+    assert!(src.contains("if (c && c.change === ds) return rangeNoteText(c);"));
+    // Intl's "GMT" at zero offset reads "UTC+0", like the picker labels.
+    assert!(src.contains("return /^UTC([+-]0(:00)?)?$/.test(s) ? 'UTC+0' : s;"));
+    // Week and column views both look only at days with times.
+    assert!(src.contains("return (slotData[d.dateStr] || []).length > 0;"));
+    assert!(src.contains("if (!slots || slots.length === 0) continue;"));
+}
+
 /// #265: the guest picker offers every zone, whatever the guest's own one,
 /// and selects the guest's exactly once. The page also carries what the
 /// clock-change note needs.
