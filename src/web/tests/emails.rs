@@ -661,6 +661,92 @@ async fn dashboard_approval_notifies_watchers() {
     assert!(mail.contains("https://cal.test/booking/claim/"), "{mail}");
 }
 
+/// #267: a booking is offered to watchers when it is first confirmed.
+/// Approving a reschedule of it, from the dashboard or the emailed link,
+/// must not offer it again: no new claim token, no second email.
+#[tokio::test]
+async fn approving_a_reschedule_does_not_offer_it_to_watchers_again() {
+    let _env = crate::test_support::ENV_LOCK.lock().await;
+    let _vars = crate::test_support::EnvGuard::new();
+    std::env::set_var("CALRS_BASE_URL", "https://cal.test");
+    let (app, pool, session, et_id) = setup_test_app().await;
+    let (port, mails) = spawn_capturing_mta().await;
+    use_capturing_mta(&pool, port).await;
+
+    let watcher_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO users (id, email, name, role, auth_provider, username, enabled) VALUES (?, 'watcher-again@test.com', 'Watcher', 'user', 'local', 'watcher-again', 1)")
+        .bind(&watcher_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let team_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO teams (id, name, slug, visibility) VALUES (?, 'Sales', 'sales-again', 'public')",
+    )
+    .bind(&team_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO team_members (team_id, user_id, role, source) VALUES (?, ?, 'member', 'direct')")
+        .bind(&team_id)
+        .bind(&watcher_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO event_type_watchers (event_type_id, team_id) VALUES (?, ?)")
+        .bind(&et_id)
+        .bind(&team_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    for (day, path) in [(18, "dashboard"), (19, "token")] {
+        // Confirmed first (the trigger stamps it), then moved by its guest
+        // to a time awaiting approval.
+        let id = insert_v1_booking(
+            &pool,
+            &et_id,
+            &format!("g-watch-{path}@test.com"),
+            Utc::now() + Duration::days(day),
+            30,
+            "confirmed",
+            &[],
+        )
+        .await;
+        sqlx::query("UPDATE bookings SET status = 'pending', ics_sequence = 1 WHERE id = ?")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let csrf = "csrf-267-watch";
+        let request = if path == "dashboard" {
+            post_form(
+                &format!("/dashboard/bookings/{}/confirm", id),
+                &session,
+                csrf,
+                &format!("_csrf={}", csrf),
+            )
+        } else {
+            post_bare(&format!("/booking/approve/confirm-{id}"))
+        };
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert!(response.status().is_success() || response.status().is_redirection());
+        assert_eq!(booking_status(&pool, &id).await, "confirmed", "{path}");
+
+        let tokens: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM booking_claim_tokens WHERE booking_id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(tokens, 0, "{path}: no new claim offer");
+        // The guest's email settles the spawned sends before counting.
+        settled_mails_to(&mails, &format!("g-watch-{path}@test.com")).await;
+        let offers = settled_mails_to(&mails, "watcher-again@test.com").await;
+        assert!(offers.is_empty(), "{path}: {offers:?}");
+    }
+}
+
 /// Two declines racing email the guest once.
 #[tokio::test]
 async fn concurrent_declines_notify_the_guest_once() {

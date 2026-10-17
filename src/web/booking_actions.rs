@@ -401,16 +401,19 @@ pub(super) async fn approve_booking_by_token(
     caldav_push_booking(&state.pool, &state.secret_key, &user_id, &uid, &details).await;
     resource_push_booking(&state.pool, &state.secret_key, &uid, &details).await;
 
-    // Notify watcher teams
-    notify_watchers(
-        &state.pool,
-        &state.secret_key,
-        &bid,
-        &event_type_id,
-        &host_name,
-        &details,
-    )
-    .await;
+    // Notify watcher teams. An approved reschedule was offered to them when
+    // it was first confirmed: no second offer.
+    if !reschedule_approval {
+        notify_watchers(
+            &state.pool,
+            &state.secret_key,
+            &bid,
+            &event_type_id,
+            &host_name,
+            &details,
+        )
+        .await;
+    }
 
     // Send confirmation email to guest
     if let Ok(Some(smtp_config)) =

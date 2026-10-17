@@ -1552,16 +1552,19 @@ pub(super) async fn confirm_booking(
     resource_push_booking(&state.pool, &state.secret_key, &uid, &details).await;
 
     // Notify watcher teams, as the token approve path does: a booking that
-    // needed approval only becomes claimable once it is confirmed.
-    notify_watchers(
-        &state.pool,
-        &state.secret_key,
-        &bid,
-        &et_id,
-        &details.host_name,
-        &details,
-    )
-    .await;
+    // needed approval only becomes claimable once it is confirmed. An
+    // approved reschedule was offered when first confirmed: no second offer.
+    if !reschedule_approval {
+        notify_watchers(
+            &state.pool,
+            &state.secret_key,
+            &bid,
+            &et_id,
+            &details.host_name,
+            &details,
+        )
+        .await;
+    }
 
     // Confirmation SMS to the guest, the same deferred send as the token
     // approve path: a pending booking stays silent until the host approves.
