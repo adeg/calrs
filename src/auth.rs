@@ -1548,7 +1548,9 @@ const REASON_MAX_CHARS: usize = 512;
 /// Unquoted text, the field and type names that say
 /// what went wrong, is kept.
 fn redact_reason(message: &str) -> String {
-    let chars: Vec<char> = message.chars().collect();
+    // Bound the scan as well as the output. A literal cut by the bound is
+    // unclosed, so it stays masked through the end.
+    let chars: Vec<char> = message.chars().take(4 * REASON_MAX_CHARS).collect();
     let mut out = String::with_capacity(message.len());
     mask_literals(&chars, 0, None, &mut out);
     if out.chars().count() > REASON_MAX_CHARS {
@@ -1617,9 +1619,11 @@ fn mask_literals(
             return Some(chars.len());
         };
         let raw = &chars[start..end - open_len];
-        if raw.iter().any(|&c| c == '"' || c == '`') {
-            // A quoted message quoting values of its own: keep its text and
-            // the masked values inside.
+        if raw.iter().any(|&c| c == '"' || c == '`') && wraps_error_message(&chars[..i]) {
+            // A `Debug`-wrapped serde message quoting values of its own:
+            // keep its text and the masked values inside. Any other quoted
+            // text holding quotes is a value with quotes in it (serde writes
+            // `string "a \"b\" c"`), so it is masked whole below.
             out.extend(&chars[i..start]);
             out.push_str(&inner);
             out.extend(&chars[end - open_len..end]);
@@ -1631,6 +1635,13 @@ fn mask_literals(
         i = end;
     }
     close.is_none().then_some(i)
+}
+
+/// Whether the text before a quoted literal opens a `Debug`-formatted
+/// serde_json error, `Error("message", line: .., column: ..)`, which is how
+/// openidconnect reports an id_token claim of the wrong type.
+fn wraps_error_message(before: &[char]) -> bool {
+    before.ends_with(&['E', 'r', 'r', 'o', 'r', '('])
 }
 
 /// Whether a literal is harmless enough to log as is: a short
@@ -2108,6 +2119,37 @@ mod tests {
                 "{reason}"
             );
         }
+    }
+
+    #[test]
+    fn a_value_with_quotes_in_it_is_masked_whole() {
+        // serde escapes quotes inside a string value, which used to read as a
+        // nested message: the text around the inner quotes was logged.
+        type Resp = openidconnect::core::CoreTokenResponse;
+        let value = r#"Jean \"JD\" Dupont, 12 Rue de la Paix"#;
+        let top = format!(r#"{{"access_token":"x","token_type":"Bearer","expires_in":"{value}"}}"#);
+        let claims = format!(
+            r#"{{"iss":"https://idp","sub":"s","aud":"c","exp":1,"iat":1,"email_verified":"{value}"}}"#
+        );
+        let id_token = format!("{}.{}.{SIG}", b64(r#"{"alg":"RS256"}"#), b64(&claims));
+        let in_claim =
+            format!(r#"{{"access_token":"x","token_type":"Bearer","id_token":"{id_token}"}}"#);
+        for body in [top, in_claim] {
+            let err = serde_json::from_slice::<Resp>(body.as_bytes()).unwrap_err();
+            let reason = redact_reason(&err.to_string());
+            for part in ["Jean", "JD", "Dupont", "Paix"] {
+                assert!(!reason.contains(part), "{reason}");
+            }
+            assert!(reason.contains("invalid type"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn redact_reason_bounds_its_scan_and_keeps_a_cut_literal_masked() {
+        let msg = format!(r#"invalid type: string "{}""#, "secret ".repeat(1000));
+        let out = redact_reason(&msg);
+        assert!(!out.contains("secret"), "{out}");
+        assert!(out.chars().count() <= REASON_MAX_CHARS + 3);
     }
 
     #[tokio::test]
