@@ -391,6 +391,24 @@ async fn body_string(response: axum::http::Response<Body>) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
+/// Values of the selected options in the `<select id="{id}">` of a page,
+/// unescaped, so a test can submit what a browser would.
+fn selected_options(body: &str, id: &str) -> Vec<String> {
+    let start = body
+        .find(&format!(r#"<select id="{id}""#))
+        .unwrap_or_else(|| panic!("no <select id={id:?}>"));
+    let end = start + body[start..].find("</select>").unwrap();
+    body[start..end]
+        .split("<option ")
+        .skip(1)
+        .filter(|opt| opt.split('>').next().unwrap_or("").contains(" selected"))
+        .map(|opt| {
+            let value = opt.split('"').nth(1).unwrap_or_default();
+            value.replace("&#x2f;", "/").replace("&#x2b;", "+")
+        })
+        .collect()
+}
+
 // --- POST handler helpers ---
 
 fn post_form(uri: &str, session: &str, csrf: &str, body: &str) -> axum::http::Request<Body> {

@@ -1595,12 +1595,7 @@ pub(super) async fn guest_reschedule_slots(
     }).collect();
     let available_dates: Vec<String> = slot_days.iter().map(|d| d.date.clone()).collect();
 
-    let tz_options: Vec<minijinja::Value> = common_timezones_with(&guest_tz_name)
-        .iter()
-        .map(|(iana, label)| {
-            context! { value => iana, label => label, selected => (*iana == guest_tz_name) }
-        })
-        .collect();
+    let tz_options = timezone_options(&guest_tz_name, lang);
 
     let reschedule_base = format!("/booking/reschedule/{}", token);
 

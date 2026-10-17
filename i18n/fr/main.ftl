@@ -33,6 +33,19 @@ slots-location-google-meet = Google Meet
 
 slots-tz-label = Votre fuseau horaire
 slots-time-format-label = Format de l'heure
+tz-group-common = Fuseaux horaires courants
+tz-region-africa = Afrique
+tz-region-america = Amériques
+tz-region-antarctica = Antarctique
+tz-region-arctic = Arctique
+tz-region-asia = Asie
+tz-region-atlantic = Océan Atlantique
+tz-region-australia = Australie
+tz-region-europe = Europe
+tz-region-indian = Océan Indien
+tz-region-pacific = Océan Pacifique
+slots-offset-note-day = Les horaires du %1 sont en %2 (changement d'heure le %3).
+slots-offset-note-range = Changement d'heure le %1 : les horaires sont ensuite en %2.
 
 slots-view-month = Vue mensuelle
 slots-view-week = Vue hebdomadaire

@@ -33,6 +33,19 @@ slots-location-google-meet = Google Meet
 
 slots-tz-label = Your timezone
 slots-time-format-label = Time format
+tz-group-common = Common timezones
+tz-region-africa = Africa
+tz-region-america = Americas
+tz-region-antarctica = Antarctica
+tz-region-arctic = Arctic
+tz-region-asia = Asia
+tz-region-atlantic = Atlantic Ocean
+tz-region-australia = Australia
+tz-region-europe = Europe
+tz-region-indian = Indian Ocean
+tz-region-pacific = Pacific Ocean
+slots-offset-note-day = Times on %1 are %2 (clocks change on %3).
+slots-offset-note-range = Clocks change on %1: from then on, times are %2.
 
 slots-view-month = Month view
 slots-view-week = Week view

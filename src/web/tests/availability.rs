@@ -2812,3 +2812,271 @@ fn horizon_last_date_survives_an_absurdly_large_horizon() {
         "a horizon past the representable calendar is effectively unlimited"
     );
 }
+
+// --- Timezone pickers (#265) ---
+
+/// A summer instant, so DST zones show their summer offset.
+fn tz_summer() -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap()
+}
+
+fn tz_find<'a>(groups: &'a [TzGroup], value: &str) -> Vec<(Option<&'static str>, &'a TzOption)> {
+    groups
+        .iter()
+        .flat_map(|g| g.options.iter().map(move |o| (g.area, o)))
+        .filter(|(_, o)| o.value == value)
+        .collect()
+}
+
+#[test]
+fn timezone_groups_list_bucharest_whatever_the_selection() {
+    // The issue: Bucharest showed up only when the browser was in it.
+    for selected in ["", "UTC", "Europe/Paris", "America/New_York"] {
+        let groups = timezone_groups(selected, tz_summer());
+        let hits = tz_find(&groups, "Europe/Bucharest");
+        assert_eq!(hits.len(), 1, "Bucharest listed once with {selected:?}");
+        assert_eq!(hits[0].0, Some("Europe"));
+        assert_eq!(hits[0].1.label, "Bucharest (UTC+3)");
+        assert!(!hits[0].1.selected);
+    }
+}
+
+#[test]
+fn timezone_groups_put_common_zones_first_then_areas_in_order() {
+    let groups = timezone_groups("", tz_summer());
+    assert_eq!(groups[0].area, None);
+    assert_eq!(groups[0].options[0].value, "Pacific/Midway");
+    assert!(groups[0]
+        .options
+        .iter()
+        .any(|o| o.value == "Europe/Paris" && o.label == "Paris, Brussels (UTC+2)"));
+    let areas: Vec<&str> = groups[1..].iter().filter_map(|g| g.area).collect();
+    assert_eq!(
+        areas,
+        [
+            "Africa",
+            "America",
+            "Antarctica",
+            "Arctic",
+            "Asia",
+            "Atlantic",
+            "Australia",
+            "Europe",
+            "Indian",
+            "Pacific"
+        ]
+    );
+    for g in &groups[1..] {
+        let labels: Vec<String> = g.options.iter().map(|o| o.label.to_lowercase()).collect();
+        let mut sorted = labels.clone();
+        sorted.sort();
+        assert_eq!(labels, sorted, "{:?} is sorted by name", g.area);
+    }
+    let total: usize = groups.iter().map(|g| g.options.len()).sum();
+    assert!(total > 400, "every IANA location is offered, got {total}");
+}
+
+#[test]
+fn timezone_groups_list_each_zone_once_and_select_it_once() {
+    let groups = timezone_groups("Europe/Paris", tz_summer());
+    let mut seen = std::collections::HashSet::new();
+    for g in &groups {
+        for o in &g.options {
+            assert!(seen.insert(o.value.clone()), "{} listed twice", o.value);
+        }
+    }
+    for selected in [
+        "Europe/Paris",
+        "Europe/Bucharest",
+        "UTC",
+        "US/Eastern",
+        "Asia/Calcutta",
+    ] {
+        let groups = timezone_groups(selected, tz_summer());
+        let chosen: Vec<&TzOption> = groups
+            .iter()
+            .flat_map(|g| g.options.iter())
+            .filter(|o| o.selected)
+            .collect();
+        assert_eq!(chosen.len(), 1, "one selected option for {selected}");
+        assert_eq!(chosen[0].value, selected);
+        assert_eq!(tz_find(&groups, selected).len(), 1);
+    }
+}
+
+#[test]
+fn timezone_groups_leave_legacy_aliases_out_unless_selected() {
+    let groups = timezone_groups("", tz_summer());
+    for alias in [
+        "US/Eastern",
+        "Etc/GMT+3",
+        "EST5EDT",
+        "Asia/Calcutta",
+        "Europe/Kiev",
+        "Australia/NSW",
+        "Asia/Istanbul",
+        "Europe/Nicosia",
+    ] {
+        assert!(tz_find(&groups, alias).is_empty(), "{alias} is not listed");
+    }
+    // Zones merged into another one but that are places of their own stay,
+    // and so do the canonical ids of the two-continent cities.
+    for kept in [
+        "Europe/Amsterdam",
+        "Europe/Oslo",
+        "Europe/Kyiv",
+        "America/Montreal",
+        "America/Yellowknife",
+        "America/Thunder_Bay",
+        "America/Nipigon",
+        "America/Rainy_River",
+        "America/Pangnirtung",
+        "Europe/Uzhgorod",
+        "Europe/Zaporozhye",
+        "Australia/Currie",
+        "Asia/Nicosia",
+        "Europe/Istanbul",
+    ] {
+        assert_eq!(tz_find(&groups, kept).len(), 1, "{kept} is listed");
+    }
+    // Every excluded name is a real chrono-tz id, so the list has no typo.
+    for name in LEGACY_TIMEZONE_NAMES {
+        assert!(name.parse::<Tz>().is_ok(), "{name} parses");
+    }
+
+    // The alternate id still shows when it is the saved one.
+    let groups = timezone_groups("Europe/Nicosia", tz_summer());
+    let hit = tz_find(&groups, "Europe/Nicosia");
+    assert_eq!(hit[0].0, Some("Europe"));
+    assert!(hit[0].1.selected);
+
+    // A saved alias is never dropped: in its area when it has one, among
+    // the common zones by offset otherwise.
+    let groups = timezone_groups("Asia/Calcutta", tz_summer());
+    let hit = tz_find(&groups, "Asia/Calcutta");
+    assert_eq!(hit[0].0, Some("Asia"));
+    assert_eq!(hit[0].1.label, "Calcutta (UTC+5:30)");
+
+    let groups = timezone_groups("US/Eastern", tz_summer());
+    let common = &groups[0].options;
+    let pos = common.iter().position(|o| o.value == "US/Eastern").unwrap();
+    assert_eq!(common[pos].label, "US/Eastern (UTC-4)");
+    assert!(common[pos].selected);
+    assert_eq!(common[pos - 1].value, "America/New_York");
+
+    // Even an id chrono-tz does not know is offered, so the form posts it
+    // back as it is (and `resolve_saved_timezone` keeps it).
+    let groups = timezone_groups("Mars/Olympus_Mons", tz_summer());
+    let hit = tz_find(&groups, "Mars/Olympus_Mons");
+    assert_eq!(hit.len(), 1);
+    assert!(hit[0].1.selected);
+}
+
+#[test]
+fn timezone_labels_read_city_first_with_the_offset() {
+    let groups = timezone_groups("", tz_summer());
+    let label = |v: &str| tz_find(&groups, v)[0].1.label.clone();
+    assert_eq!(
+        label("America/Argentina/Buenos_Aires"),
+        "Buenos Aires, Argentina (UTC-3)"
+    );
+    assert_eq!(label("America/St_Johns"), "St Johns (UTC-2:30)");
+    assert_eq!(label("Asia/Kathmandu"), "Kathmandu (UTC+5:45)");
+    assert_eq!(label("Europe/Moscow"), "Moscow (UTC+3)");
+    assert_eq!(
+        label("Antarctica/DumontDUrville"),
+        "Dumont d'Urville (UTC+10)"
+    );
+    assert_eq!(
+        label("America/Argentina/ComodRivadavia"),
+        "Comodoro Rivadavia, Argentina (UTC-3)"
+    );
+    // Zero offset reads "UTC+0", the form the slot page note copies.
+    assert_eq!(label("Atlantic/Reykjavik"), "Reykjavik (UTC+0)");
+
+    // The offset is today's: Bucharest reads UTC+2 in winter.
+    let winter = Utc.with_ymd_and_hms(2026, 12, 1, 12, 0, 0).unwrap();
+    let groups = timezone_groups("", winter);
+    assert_eq!(
+        tz_find(&groups, "Europe/Bucharest")[0].1.label,
+        "Bucharest (UTC+2)"
+    );
+}
+
+#[test]
+fn timezone_options_translate_the_group_labels() {
+    let fr = timezone_options("Europe/Bucharest", "fr");
+    let labels: Vec<String> = fr
+        .iter()
+        .map(|g| g.get_attr("label").unwrap().to_string())
+        .collect();
+    assert_eq!(labels[0], "Fuseaux horaires courants");
+    assert!(labels.contains(&"Europe".to_string()));
+    assert!(labels.contains(&"Océan Pacifique".to_string()));
+    let en = timezone_options("", "en");
+    assert_eq!(
+        en[0].get_attr("label").unwrap().to_string(),
+        "Common timezones"
+    );
+}
+
+#[test]
+fn resolve_saved_timezone_keeps_an_unchanged_value() {
+    // Posted back unchanged: kept, even when chrono-tz cannot parse it.
+    assert_eq!(
+        resolve_saved_timezone(Some("Mars/Olympus_Mons"), "Mars/Olympus_Mons"),
+        "Mars/Olympus_Mons"
+    );
+    assert_eq!(
+        resolve_saved_timezone(Some(" US/Eastern "), "US/Eastern"),
+        "US/Eastern"
+    );
+    // A real change is stored.
+    assert_eq!(
+        resolve_saved_timezone(Some("Europe/Bucharest"), "UTC"),
+        "Europe/Bucharest"
+    );
+    // Anything else unparseable, empty or missing keeps the stored value.
+    for input in [Some("Not/A_Zone"), Some(""), None] {
+        assert_eq!(resolve_saved_timezone(input, "Asia/Tokyo"), "Asia/Tokyo");
+    }
+}
+
+#[test]
+fn resolve_event_type_tz_keeps_a_null_row_following_its_owner() {
+    let follows = "Europe/Bucharest";
+    // NULL stays NULL when the form posts back what it showed.
+    assert_eq!(
+        resolve_event_type_tz(Some("Europe/Bucharest"), None, follows),
+        None
+    );
+    assert_eq!(
+        resolve_event_type_tz(Some("Europe/Bucharest"), Some(""), follows),
+        None
+    );
+    // A different, valid zone pins it; an invalid one leaves it NULL.
+    assert_eq!(
+        resolve_event_type_tz(Some("Asia/Tokyo"), None, follows).as_deref(),
+        Some("Asia/Tokyo")
+    );
+    assert_eq!(
+        resolve_event_type_tz(Some("Not/A_Zone"), None, follows),
+        None
+    );
+    // A stored zone follows resolve_saved_timezone, even when it matches the
+    // owner's: it was pinned on purpose.
+    assert_eq!(
+        resolve_event_type_tz(Some("Europe/Bucharest"), Some("Europe/Bucharest"), follows)
+            .as_deref(),
+        Some("Europe/Bucharest")
+    );
+    assert_eq!(
+        resolve_event_type_tz(
+            Some("Mars/Olympus_Mons"),
+            Some("Mars/Olympus_Mons"),
+            follows
+        )
+        .as_deref(),
+        Some("Mars/Olympus_Mons")
+    );
+}

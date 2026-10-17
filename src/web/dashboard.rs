@@ -671,12 +671,7 @@ fn settings_render(
         Ok(t) => t,
         Err(e) => return internal_error_html("internal", &e),
     };
-    let tz_options: Vec<minijinja::Value> = common_timezones_with("")
-        .iter()
-        .map(|(iana, label)| {
-            context! { value => iana, label => label }
-        })
-        .collect();
+    let tz_options = timezone_options(values.timezone, lang);
     let lang_options: Vec<minijinja::Value> = crate::i18n::supported_with_labels()
         .map(|(code, label)| context! { value => code, label => label })
         .collect();
@@ -765,13 +760,7 @@ pub(super) async fn settings_save(
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
-    let timezone = form
-        .timezone
-        .as_deref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty() && s.parse::<chrono_tz::Tz>().is_ok())
-        .unwrap_or("UTC")
-        .to_string();
+    let timezone = resolve_saved_timezone(form.timezone.as_deref(), &user.timezone);
 
     // Empty / "auto" / unsupported codes all map to NULL = follow Accept-Language.
     let language: Option<String> = form

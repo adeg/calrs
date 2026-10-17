@@ -315,8 +315,12 @@
     <div class="form-group" style="margin-bottom: 1rem;">
       <label for="event_type_timezone">{{ t("settings-timezone") }}</label>
       <select id="event_type_timezone" name="timezone" style="width: 100%; padding: 0.5rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: 0.9rem;">
-        {% for tz in tz_options %}
-          <option value="{{ tz.value }}" {% if tz.value == form_timezone %}selected{% endif %}>{{ tz.label }}</option>
+        {% for group in tz_options %}
+          <optgroup label="{{ group.label }}">
+          {% for tz in group.options %}
+            <option value="{{ tz.value }}"{% if tz.selected %} selected{% endif %}>{{ tz.label }}</option>
+          {% endfor %}
+          </optgroup>
         {% endfor %}
       </select>
       <span class="hint" style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-top: 0.25rem;">{{ t("etf-timezone-help") }}</span>

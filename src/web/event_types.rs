@@ -626,10 +626,7 @@ pub(super) async fn new_event_type_form(
             form_reschedule_notice_unit => "minutes",
             form_booking_horizon_days => "",
             form_pending => PendingSettings::DEFAULT.context(),
-            tz_options => common_timezones_with(&user.timezone)
-                .iter()
-                .map(|(iana, label)| context! { value => iana, label => label })
-                .collect::<Vec<_>>(),
+            tz_options => timezone_options(&user.timezone, auth_user.lang),
             error => "",
         })
         .unwrap_or_else(|e| internal_error_body("template render", &e)),
@@ -993,15 +990,12 @@ pub(super) async fn edit_event_type_form(
             .await
             .unwrap_or(0);
 
-    let form_timezone: String =
-        sqlx::query_scalar::<_, Option<String>>("SELECT timezone FROM event_types WHERE id = ?")
-            .bind(&et_id)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None)
-            .flatten()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| user.timezone.clone());
+    // With no timezone of its own the event type follows its owner's, so
+    // show that one: posted back unchanged, the save keeps the column NULL.
+    let form_timezone: String = match stored_event_type_tz(&state.pool, &et_id).await {
+        Some(tz) => tz,
+        None => event_type_followed_tz(&state.pool, &et_id).await,
+    };
 
     // Min-notice for guest-initiated cancel and reschedule (NULL = no
     // restriction). Pulled separately to keep the existing tuple compact.
@@ -1274,10 +1268,7 @@ pub(super) async fn edit_event_type_form(
             form_reschedule_notice_unit => form_reschedule_notice_unit,
             form_booking_horizon_days => form_booking_horizon_days,
             form_pending => form_pending,
-            tz_options => common_timezones_with(&form_timezone)
-                .iter()
-                .map(|(iana, label)| context! { value => iana, label => label })
-                .collect::<Vec<_>>(),
+            tz_options => timezone_options(&form_timezone, auth_user.lang),
             is_group => team_id.is_some(),
             is_round_robin_group => is_round_robin_group,
             is_collective_team => is_collective_team,
@@ -1420,7 +1411,11 @@ pub(super) async fn update_event_type(
         _ => "month".to_string(),
     };
 
-    let timezone = normalize_event_type_tz(form.timezone.as_deref(), &user.timezone);
+    let timezone = resolve_event_type_tz(
+        form.timezone.as_deref(),
+        stored_event_type_tz(&state.pool, &et_id).await.as_deref(),
+        &event_type_followed_tz(&state.pool, &et_id).await,
+    );
     let cancel_notice_min =
         parse_notice_to_minutes(&form.cancel_notice_value, &form.cancel_notice_unit);
     let reschedule_notice_min =
@@ -1849,10 +1844,7 @@ async fn render_event_type_form_error(
             form_pending => PendingSettings::from_form(form)
                 .unwrap_or(PendingSettings::DEFAULT)
                 .context(),
-            tz_options => common_timezones_with(form.timezone.as_deref().unwrap_or(&auth_user.user.timezone))
-                .iter()
-                .map(|(iana, label)| context! { value => iana, label => label })
-                .collect::<Vec<_>>(),
+            tz_options => timezone_options(form.timezone.as_deref().unwrap_or(&auth_user.user.timezone), auth_user.lang),
             error => error,
             sidebar => sidebar_context(auth_user, "event-types"),
             lang => auth_user.lang,
@@ -2150,10 +2142,7 @@ pub(super) async fn new_group_event_type_form(
             form_booking_horizon_days => "",
             form_pending => PendingSettings::DEFAULT.context(),
             form_timezone => &user.timezone,
-            tz_options => common_timezones_with(&user.timezone)
-                .iter()
-                .map(|(iana, label)| context! { value => iana, label => label })
-                .collect::<Vec<_>>(),
+            tz_options => timezone_options(&user.timezone, auth_user.lang),
             watcher_teams => watcher_teams_ctx,
             selected_watcher_team_ids => "",
             error => "",
@@ -2488,15 +2477,12 @@ pub(super) async fn edit_group_event_type_form(
             .await
             .unwrap_or(0);
 
-    let form_timezone: String =
-        sqlx::query_scalar::<_, Option<String>>("SELECT timezone FROM event_types WHERE id = ?")
-            .bind(&et_id)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None)
-            .flatten()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| user.timezone.clone());
+    // With no timezone of its own the event type follows its owner's, so
+    // show that one: posted back unchanged, the save keeps the column NULL.
+    let form_timezone: String = match stored_event_type_tz(&state.pool, &et_id).await {
+        Some(tz) => tz,
+        None => event_type_followed_tz(&state.pool, &et_id).await,
+    };
 
     // Min-notice for guest-initiated cancel and reschedule (NULL = no
     // restriction). Pulled separately to keep the existing tuple compact.
@@ -2730,10 +2716,7 @@ pub(super) async fn edit_group_event_type_form(
             form_reschedule_notice_unit => form_reschedule_notice_unit,
             form_booking_horizon_days => form_booking_horizon_days,
             form_pending => form_pending,
-            tz_options => common_timezones_with(&form_timezone)
-                .iter()
-                .map(|(iana, label)| context! { value => iana, label => label })
-                .collect::<Vec<_>>(),
+            tz_options => timezone_options(&form_timezone, auth_user.lang),
             is_round_robin_group => is_round_robin_group,
             is_collective_team => is_collective_team,
             priority_members => members_ctx,
@@ -2892,7 +2875,11 @@ pub(super) async fn update_group_event_type(
         _ => "month".to_string(),
     };
 
-    let timezone = normalize_event_type_tz(form.timezone.as_deref(), &user.timezone);
+    let timezone = resolve_event_type_tz(
+        form.timezone.as_deref(),
+        stored_event_type_tz(&state.pool, &et_id).await.as_deref(),
+        &event_type_followed_tz(&state.pool, &et_id).await,
+    );
     let cancel_notice_min =
         parse_notice_to_minutes(&form.cancel_notice_value, &form.cancel_notice_unit);
     let reschedule_notice_min =
