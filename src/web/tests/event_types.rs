@@ -440,6 +440,96 @@ async fn delete_event_type_with_no_bookings() {
 
 // --- Update event type ---
 
+/// Saves the event type edit form at `uri` with only the timezone varying,
+/// and returns the stored column.
+async fn save_et_timezone(
+    app: &Router,
+    pool: &SqlitePool,
+    session: &str,
+    uri: &str,
+    slug: &str,
+    et_id: &str,
+    tz: &str,
+) -> Option<String> {
+    let csrf = "test-csrf-et-tz-265";
+    let body = format!(
+        "_csrf={csrf}&title=Tz+Test&slug={slug}&duration_min=30&location_value=https%3A%2F%2Fmeet.example.com&avail_days=1,2,3,4,5&avail_start=09:00&avail_end=17:00&timezone={}",
+        tz.replace('/', "%2F")
+    );
+    let response = app
+        .clone()
+        .oneshot(post_form(uri, session, csrf, &body))
+        .await
+        .unwrap();
+    assert!(response.status().is_redirection() || response.status() == 200);
+    sqlx::query_scalar("SELECT timezone FROM event_types WHERE id = ?")
+        .bind(et_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// #265: an event type with no timezone of its own follows its owner's.
+/// Saving the edit form without touching the timezone used to pin it to
+/// the owner's current one; it now stays NULL. A changed timezone is
+/// stored, and a stored one chrono-tz cannot parse survives a save that
+/// posts it back, while other unparseable input is refused.
+#[tokio::test]
+async fn edit_event_type_keeps_a_timezone_the_form_did_not_change() {
+    let (app, pool, session, et_id) = setup_test_app().await;
+    let (team_id, team_et) = seed_team_event_type(&pool).await;
+    sqlx::query("UPDATE users SET timezone = 'Europe/Bucharest' WHERE username = 'testuser'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let personal = "/dashboard/event-types/test-meeting/edit".to_string();
+    let team = format!("/dashboard/group-event-types/{team_id}/team-sync/edit");
+
+    for (uri, slug, id) in [
+        (&personal, "test-meeting", &et_id),
+        (&team, "team-sync", &team_et),
+    ] {
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT timezone FROM event_types WHERE id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, None, "{uri} starts without a timezone");
+
+        // The form shows the timezone the event type follows.
+        let response = app
+            .clone()
+            .oneshot(get_authed(uri, &session))
+            .await
+            .unwrap();
+        let body = body_string(response).await;
+        let shown = selected_options(&body, "event_type_timezone");
+        assert_eq!(shown, ["Europe/Bucharest"], "{uri}");
+
+        let save = |tz: &'static str| save_et_timezone(&app, &pool, &session, uri, slug, id, tz);
+        assert_eq!(
+            save("Europe/Bucharest").await,
+            None,
+            "{uri} keeps following"
+        );
+        assert_eq!(save("Asia/Tokyo").await.as_deref(), Some("Asia/Tokyo"));
+        assert_eq!(save("Not/A_Zone").await.as_deref(), Some("Asia/Tokyo"));
+
+        sqlx::query("UPDATE event_types SET timezone = 'Mars/Olympus_Mons' WHERE id = ?")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            save("Mars/Olympus_Mons").await.as_deref(),
+            Some("Mars/Olympus_Mons"),
+            "{uri} keeps a stored value posted back unchanged"
+        );
+        assert_eq!(save("Europe/Paris").await.as_deref(), Some("Europe/Paris"));
+    }
+}
+
 #[tokio::test]
 async fn update_event_type_changes_title() {
     let (app, pool, session, _) = setup_test_app().await;

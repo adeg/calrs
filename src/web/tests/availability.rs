@@ -2940,8 +2940,8 @@ fn timezone_groups_leave_legacy_aliases_out_unless_selected() {
     assert!(common[pos].selected);
     assert_eq!(common[pos - 1].value, "America/New_York");
 
-    // Even an id chrono-tz does not know is kept, so a save does not
-    // replace it with the first option.
+    // Even an id chrono-tz does not know is offered, so the form posts it
+    // back as it is (and `resolve_saved_timezone` keeps it).
     let groups = timezone_groups("Mars/Olympus_Mons", tz_summer());
     let hit = tz_find(&groups, "Mars/Olympus_Mons");
     assert_eq!(hit.len(), 1);
@@ -2983,5 +2983,66 @@ fn timezone_options_translate_the_group_labels() {
     assert_eq!(
         en[0].get_attr("label").unwrap().to_string(),
         "Common timezones"
+    );
+}
+
+#[test]
+fn resolve_saved_timezone_keeps_an_unchanged_value() {
+    // Posted back unchanged: kept, even when chrono-tz cannot parse it.
+    assert_eq!(
+        resolve_saved_timezone(Some("Mars/Olympus_Mons"), "Mars/Olympus_Mons"),
+        "Mars/Olympus_Mons"
+    );
+    assert_eq!(
+        resolve_saved_timezone(Some(" US/Eastern "), "US/Eastern"),
+        "US/Eastern"
+    );
+    // A real change is stored.
+    assert_eq!(
+        resolve_saved_timezone(Some("Europe/Bucharest"), "UTC"),
+        "Europe/Bucharest"
+    );
+    // Anything else unparseable, empty or missing keeps the stored value.
+    for input in [Some("Not/A_Zone"), Some(""), None] {
+        assert_eq!(resolve_saved_timezone(input, "Asia/Tokyo"), "Asia/Tokyo");
+    }
+}
+
+#[test]
+fn resolve_event_type_tz_keeps_a_null_row_following_its_owner() {
+    let follows = "Europe/Bucharest";
+    // NULL stays NULL when the form posts back what it showed.
+    assert_eq!(
+        resolve_event_type_tz(Some("Europe/Bucharest"), None, follows),
+        None
+    );
+    assert_eq!(
+        resolve_event_type_tz(Some("Europe/Bucharest"), Some(""), follows),
+        None
+    );
+    // A different, valid zone pins it; an invalid one leaves it NULL.
+    assert_eq!(
+        resolve_event_type_tz(Some("Asia/Tokyo"), None, follows).as_deref(),
+        Some("Asia/Tokyo")
+    );
+    assert_eq!(
+        resolve_event_type_tz(Some("Not/A_Zone"), None, follows),
+        None
+    );
+    // A stored zone follows resolve_saved_timezone, even when it matches the
+    // owner's: it was pinned on purpose.
+    assert_eq!(
+        resolve_event_type_tz(Some("Europe/Bucharest"), Some("Europe/Bucharest"), follows)
+            .as_deref(),
+        Some("Europe/Bucharest")
+    );
+    assert_eq!(
+        resolve_event_type_tz(
+            Some("Mars/Olympus_Mons"),
+            Some("Mars/Olympus_Mons"),
+            follows
+        )
+        .as_deref(),
+        Some("Mars/Olympus_Mons")
     );
 }

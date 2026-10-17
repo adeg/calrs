@@ -760,13 +760,7 @@ pub(super) async fn settings_save(
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
-    let timezone = form
-        .timezone
-        .as_deref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty() && s.parse::<chrono_tz::Tz>().is_ok())
-        .unwrap_or("UTC")
-        .to_string();
+    let timezone = resolve_saved_timezone(form.timezone.as_deref(), &user.timezone);
 
     // Empty / "auto" / unsupported codes all map to NULL = follow Accept-Language.
     let language: Option<String> = form

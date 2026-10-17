@@ -1516,6 +1516,69 @@ pub(super) fn normalize_event_type_tz(input: Option<&str>, fallback: &str) -> St
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// Timezone to store when a form that already holds one is saved (#265).
+/// A value posted back unchanged is kept as it is, even one chrono-tz cannot
+/// parse (an old alias or a name from a newer tzdb), so a save that did not
+/// touch the field never changes it. Any other value must parse; when it
+/// does not, the stored one is kept.
+pub(super) fn resolve_saved_timezone(input: Option<&str>, stored: &str) -> String {
+    match input.map(str::trim) {
+        Some(s) if s == stored => stored.to_string(),
+        Some(s) if !s.is_empty() && s.parse::<Tz>().is_ok() => s.to_string(),
+        _ => stored.to_string(),
+    }
+}
+
+/// Timezone to store when an existing event type is saved. `stored` is the
+/// column (`None` when NULL) and `follows` the timezone a NULL row follows,
+/// its owner's profile one (see `get_host_tz`). A NULL row stays NULL when
+/// the form posts back that timezone, which is what the edit form shows for
+/// it, so editing something else does not pin the event type to today's
+/// profile timezone (#265).
+pub(super) fn resolve_event_type_tz(
+    input: Option<&str>,
+    stored: Option<&str>,
+    follows: &str,
+) -> Option<String> {
+    match stored.filter(|s| !s.is_empty()) {
+        Some(stored) => Some(resolve_saved_timezone(input, stored)),
+        None => {
+            let s = input.map(str::trim).unwrap_or_default();
+            (s != follows && s.parse::<Tz>().is_ok()).then(|| s.to_string())
+        }
+    }
+}
+
+/// An event type's own timezone column, `None` when NULL or empty.
+pub(super) async fn stored_event_type_tz(pool: &SqlitePool, et_id: &str) -> Option<String> {
+    sqlx::query_scalar::<_, Option<String>>("SELECT timezone FROM event_types WHERE id = ?")
+        .bind(et_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None)
+        .flatten()
+        .filter(|s| !s.is_empty())
+}
+
+/// The timezone an event type with no timezone of its own follows: its
+/// owner's profile timezone, as `get_host_tz` resolves it, else UTC.
+pub(super) async fn event_type_followed_tz(pool: &SqlitePool, et_id: &str) -> String {
+    sqlx::query_scalar::<_, String>(
+        "SELECT u.timezone
+         FROM event_types et
+         JOIN accounts a ON a.id = et.account_id
+         JOIN users u ON u.id = a.user_id
+         WHERE et.id = ?",
+    )
+    .bind(et_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .filter(|tz| tz.parse::<Tz>().is_ok())
+    .unwrap_or_else(|| server_tz().name().to_string())
+}
+
 /// Get the host's timezone from the event type owner's profile.
 /// Falls back to UTC when no valid timezone is configured.
 /// Convert a naive datetime in the guest's timezone to the equivalent naive
@@ -1785,7 +1848,8 @@ pub(super) fn timezone_location_label(name: &str) -> String {
 /// offset. A common zone is not repeated in its area, so whatever is
 /// selected appears exactly once. `selected` is always offered, even a
 /// legacy alias the full list leaves out (`US/Eastern`, `Asia/Calcutta`),
-/// so a saved value is never swapped for the first option on the next save.
+/// so the form posts the saved value back as it is, and the save handlers
+/// keep a value posted back unchanged (`resolve_saved_timezone`).
 pub(super) fn timezone_groups(selected: &str, now: chrono::DateTime<chrono::Utc>) -> Vec<TzGroup> {
     let is_common = |name: &str| COMMON_TIMEZONES.iter().any(|(iana, _)| *iana == name);
     let mut common: Vec<TzOption> = COMMON_TIMEZONES

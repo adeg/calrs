@@ -990,15 +990,12 @@ pub(super) async fn edit_event_type_form(
             .await
             .unwrap_or(0);
 
-    let form_timezone: String =
-        sqlx::query_scalar::<_, Option<String>>("SELECT timezone FROM event_types WHERE id = ?")
-            .bind(&et_id)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None)
-            .flatten()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| user.timezone.clone());
+    // With no timezone of its own the event type follows its owner's, so
+    // show that one: posted back unchanged, the save keeps the column NULL.
+    let form_timezone: String = match stored_event_type_tz(&state.pool, &et_id).await {
+        Some(tz) => tz,
+        None => event_type_followed_tz(&state.pool, &et_id).await,
+    };
 
     // Min-notice for guest-initiated cancel and reschedule (NULL = no
     // restriction). Pulled separately to keep the existing tuple compact.
@@ -1414,7 +1411,11 @@ pub(super) async fn update_event_type(
         _ => "month".to_string(),
     };
 
-    let timezone = normalize_event_type_tz(form.timezone.as_deref(), &user.timezone);
+    let timezone = resolve_event_type_tz(
+        form.timezone.as_deref(),
+        stored_event_type_tz(&state.pool, &et_id).await.as_deref(),
+        &event_type_followed_tz(&state.pool, &et_id).await,
+    );
     let cancel_notice_min =
         parse_notice_to_minutes(&form.cancel_notice_value, &form.cancel_notice_unit);
     let reschedule_notice_min =
@@ -2476,15 +2477,12 @@ pub(super) async fn edit_group_event_type_form(
             .await
             .unwrap_or(0);
 
-    let form_timezone: String =
-        sqlx::query_scalar::<_, Option<String>>("SELECT timezone FROM event_types WHERE id = ?")
-            .bind(&et_id)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None)
-            .flatten()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| user.timezone.clone());
+    // With no timezone of its own the event type follows its owner's, so
+    // show that one: posted back unchanged, the save keeps the column NULL.
+    let form_timezone: String = match stored_event_type_tz(&state.pool, &et_id).await {
+        Some(tz) => tz,
+        None => event_type_followed_tz(&state.pool, &et_id).await,
+    };
 
     // Min-notice for guest-initiated cancel and reschedule (NULL = no
     // restriction). Pulled separately to keep the existing tuple compact.
@@ -2877,7 +2875,11 @@ pub(super) async fn update_group_event_type(
         _ => "month".to_string(),
     };
 
-    let timezone = normalize_event_type_tz(form.timezone.as_deref(), &user.timezone);
+    let timezone = resolve_event_type_tz(
+        form.timezone.as_deref(),
+        stored_event_type_tz(&state.pool, &et_id).await.as_deref(),
+        &event_type_followed_tz(&state.pool, &et_id).await,
+    );
     let cancel_notice_min =
         parse_notice_to_minutes(&form.cancel_notice_value, &form.cancel_notice_unit);
     let reschedule_notice_min =
