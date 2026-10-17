@@ -2913,18 +2913,42 @@ fn timezone_groups_leave_legacy_aliases_out_unless_selected() {
         "EST5EDT",
         "Asia/Calcutta",
         "Europe/Kiev",
+        "Australia/NSW",
+        "Asia/Istanbul",
+        "Europe/Nicosia",
     ] {
         assert!(tz_find(&groups, alias).is_empty(), "{alias} is not listed");
     }
-    // Merged zones that are still real places stay.
+    // Zones merged into another one but that are places of their own stay,
+    // and so do the canonical ids of the two-continent cities.
     for kept in [
         "Europe/Amsterdam",
         "Europe/Oslo",
         "Europe/Kyiv",
-        "Europe/Nicosia",
+        "America/Montreal",
+        "America/Yellowknife",
+        "America/Thunder_Bay",
+        "America/Nipigon",
+        "America/Rainy_River",
+        "America/Pangnirtung",
+        "Europe/Uzhgorod",
+        "Europe/Zaporozhye",
+        "Australia/Currie",
+        "Asia/Nicosia",
+        "Europe/Istanbul",
     ] {
         assert_eq!(tz_find(&groups, kept).len(), 1, "{kept} is listed");
     }
+    // Every excluded name is a real chrono-tz id, so the list has no typo.
+    for name in LEGACY_TIMEZONE_NAMES {
+        assert!(name.parse::<Tz>().is_ok(), "{name} parses");
+    }
+
+    // The alternate id still shows when it is the saved one.
+    let groups = timezone_groups("Europe/Nicosia", tz_summer());
+    let hit = tz_find(&groups, "Europe/Nicosia");
+    assert_eq!(hit[0].0, Some("Europe"));
+    assert!(hit[0].1.selected);
 
     // A saved alias is never dropped: in its area when it has one, among
     // the common zones by offset otherwise.
@@ -2959,6 +2983,16 @@ fn timezone_labels_read_city_first_with_the_offset() {
     assert_eq!(label("America/St_Johns"), "St Johns (UTC-2:30)");
     assert_eq!(label("Asia/Kathmandu"), "Kathmandu (UTC+5:45)");
     assert_eq!(label("Europe/Moscow"), "Moscow (UTC+3)");
+    assert_eq!(
+        label("Antarctica/DumontDUrville"),
+        "Dumont d'Urville (UTC+10)"
+    );
+    assert_eq!(
+        label("America/Argentina/ComodRivadavia"),
+        "Comodoro Rivadavia, Argentina (UTC-3)"
+    );
+    // Zero offset reads "UTC+0", the form the slot page note copies.
+    assert_eq!(label("Atlantic/Reykjavik"), "Reykjavik (UTC+0)");
 
     // The offset is today's: Bucharest reads UTC+2 in winter.
     let winter = Utc.with_ymd_and_hms(2026, 12, 1, 12, 0, 0).unwrap();

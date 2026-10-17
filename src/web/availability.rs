@@ -1725,59 +1725,41 @@ const TIMEZONE_AREAS: &[&str] = &[
     "Pacific",
 ];
 
-/// Old names for a location that has a current one in the same list, taken
-/// from the renamed, duplicate and alternate-name sections of tzdb's
-/// `backward` file. Merged zones that are still real places (Amsterdam,
-/// Oslo, Accra) stay listed.
-const LEGACY_TIMEZONE_NAMES: &[&str] = &[
+/// Old names and spellings of a place that is also listed under its current
+/// name, taken from tzdb's `backward` file: the pre-1993 Australian state
+/// names, the two-part names renamed in 1995, the "alternate names" section
+/// (including a second continent for Istanbul and Nicosia, whose canonical
+/// ids are `Europe/Istanbul` and `Asia/Nicosia`) and Porto Acre, the old name
+/// of Rio Branco. Zones tzdb merged into another one but that are places in
+/// their own right (Amsterdam, Oslo, Montreal, Yellowknife) stay listed,
+/// since people look for their own city.
+pub(super) const LEGACY_TIMEZONE_NAMES: &[&str] = &[
     "Africa/Asmera",
-    "Africa/Timbuktu",
-    "America/Argentina/ComodRivadavia",
-    "America/Atka",
     "America/Buenos_Aires",
     "America/Catamarca",
-    "America/Coral_Harbour",
     "America/Cordoba",
-    "America/Ensenada",
-    "America/Fort_Wayne",
     "America/Godthab",
     "America/Indianapolis",
     "America/Jujuy",
     "America/Knox_IN",
     "America/Louisville",
     "America/Mendoza",
-    "America/Montreal",
-    "America/Nipigon",
-    "America/Pangnirtung",
     "America/Porto_Acre",
-    "America/Rainy_River",
-    "America/Rosario",
-    "America/Santa_Isabel",
-    "America/Shiprock",
-    "America/Thunder_Bay",
     "America/Virgin",
-    "America/Yellowknife",
-    "Antarctica/South_Pole",
     "Asia/Ashkhabad",
     "Asia/Calcutta",
-    "Asia/Chongqing",
     "Asia/Chungking",
     "Asia/Dacca",
-    "Asia/Harbin",
     "Asia/Istanbul",
-    "Asia/Kashgar",
     "Asia/Katmandu",
     "Asia/Macao",
     "Asia/Rangoon",
     "Asia/Saigon",
-    "Asia/Tel_Aviv",
     "Asia/Thimbu",
     "Asia/Ujung_Pandang",
     "Asia/Ulan_Bator",
     "Atlantic/Faeroe",
-    "Atlantic/Jan_Mayen",
     "Australia/ACT",
-    "Australia/Currie",
     "Australia/LHI",
     "Australia/NSW",
     "Australia/North",
@@ -1787,17 +1769,11 @@ const LEGACY_TIMEZONE_NAMES: &[&str] = &[
     "Australia/Victoria",
     "Australia/West",
     "Australia/Yancowinna",
-    "Europe/Belfast",
     "Europe/Kiev",
-    "Europe/Tiraspol",
-    "Europe/Uzhgorod",
-    "Europe/Zaporozhye",
-    "Pacific/Enderbury",
-    "Pacific/Johnston",
+    "Europe/Nicosia",
     "Pacific/Ponape",
     "Pacific/Samoa",
     "Pacific/Truk",
-    "Pacific/Yap",
 ];
 
 /// One `<option>` of a timezone picker.
@@ -1832,12 +1808,18 @@ pub(super) fn utc_offset_label(tz: Tz, now: chrono::DateTime<chrono::Utc>) -> St
 
 /// Readable name of a zone inside its area: `Europe/Bucharest` reads
 /// "Bucharest", `America/Argentina/Buenos_Aires` reads "Buenos Aires,
-/// Argentina", so the city comes first and native type-ahead finds it.
+/// Argentina", so the city comes first and native type-ahead finds it. The
+/// few ids whose spelling does not read as the place name once the
+/// underscores are gone are spelled out.
 pub(super) fn timezone_location_label(name: &str) -> String {
     let mut parts: Vec<String> = name
         .split('/')
         .skip(1)
-        .map(|p| p.replace('_', " "))
+        .map(|p| match p {
+            "DumontDUrville" => "Dumont d'Urville".to_string(),
+            "ComodRivadavia" => "Comodoro Rivadavia".to_string(),
+            _ => p.replace('_', " "),
+        })
         .collect();
     parts.reverse();
     parts.join(", ")
