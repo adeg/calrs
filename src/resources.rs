@@ -139,8 +139,10 @@ pub fn url_origin(url: &str) -> Option<(String, String, Option<u16>)> {
 }
 
 /// Extract `X-WR-CALNAME` from a feed body (used to auto-fill the name).
+/// Unfolded first: a long name is folded over several lines (#267).
 pub fn feed_calendar_name(body: &str) -> Option<String> {
-    body.lines()
+    crate::utils::unfold_ical(body)
+        .lines()
         .find(|l| l.starts_with("X-WR-CALNAME"))
         .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))
         .filter(|s| !s.is_empty())
@@ -187,15 +189,18 @@ pub async fn sync_resource(
     let mut seen: Vec<(String, String)> = Vec::new();
     let mut count = 0u32;
     for vevent in &vevents {
-        let uid = extract_vevent_field(vevent, "UID").unwrap_or_else(|| Uuid::new_v4().to_string());
-        let summary = extract_vevent_field(vevent, "SUMMARY");
-        let start_at = extract_vevent_field(vevent, "DTSTART").unwrap_or_default();
-        let end_at = extract_vevent_field(vevent, "DTEND").unwrap_or_default();
-        let status = extract_vevent_field(vevent, "STATUS");
-        let rrule = extract_vevent_field(vevent, "RRULE");
-        let recurrence_id = extract_vevent_field(vevent, "RECURRENCE-ID");
-        let transp = extract_vevent_field(vevent, "TRANSP");
-        let timezone = extract_vevent_tzid(vevent, "DTSTART");
+        // Unfolded once for the field reads below; the raw block is cached.
+        let fields = crate::utils::unfold_ical(vevent);
+        let uid =
+            extract_vevent_field(&fields, "UID").unwrap_or_else(|| Uuid::new_v4().to_string());
+        let summary = extract_vevent_field(&fields, "SUMMARY");
+        let start_at = extract_vevent_field(&fields, "DTSTART").unwrap_or_default();
+        let end_at = extract_vevent_field(&fields, "DTEND").unwrap_or_default();
+        let status = extract_vevent_field(&fields, "STATUS");
+        let rrule = extract_vevent_field(&fields, "RRULE");
+        let recurrence_id = extract_vevent_field(&fields, "RECURRENCE-ID");
+        let transp = extract_vevent_field(&fields, "TRANSP");
+        let timezone = extract_vevent_tzid(&fields, "DTSTART");
         // All-day events use VALUE=DATE ("20260730"), timed use full stamps.
         let all_day = start_at.len() == 8 && start_at.chars().all(|c| c.is_ascii_digit());
 
@@ -742,5 +747,15 @@ mod tests {
             Some("Vates Demo Lab 1")
         );
         assert_eq!(feed_calendar_name("BEGIN:VCALENDAR\r\n"), None);
+    }
+
+    /// #267: a name past 75 octets arrives folded and must be read whole.
+    #[test]
+    fn feed_calendar_name_unfolds_a_long_name() {
+        let body = "BEGIN:VCALENDAR\r\nX-WR-CALNAME:Vates Demo Lab 1, second floor, the room \r\n with the big screen\r\nEND:VCALENDAR\r\n";
+        assert_eq!(
+            feed_calendar_name(body).as_deref(),
+            Some("Vates Demo Lab 1, second floor, the room with the big screen")
+        );
     }
 }

@@ -679,18 +679,20 @@ async fn upsert_provider_events(
     for raw in raw_events {
         let vevent_blocks = split_vevents(&raw.ical);
         for vevent in &vevent_blocks {
+            // Unfolded once for the field reads below (#267).
+            let fields = crate::utils::unfold_ical(vevent);
             let uid =
-                extract_vevent_field(vevent, "UID").unwrap_or_else(|| Uuid::new_v4().to_string());
-            let summary = extract_vevent_field(vevent, "SUMMARY");
-            let start_at = extract_vevent_field(vevent, "DTSTART").unwrap_or_default();
-            let end_at = extract_vevent_field(vevent, "DTEND").unwrap_or_default();
-            let location = extract_vevent_field(vevent, "LOCATION");
-            let description = extract_vevent_field(vevent, "DESCRIPTION");
-            let status = extract_vevent_field(vevent, "STATUS");
-            let rrule = extract_vevent_field(vevent, "RRULE");
-            let recurrence_id = extract_vevent_field(vevent, "RECURRENCE-ID");
-            let transp = extract_vevent_field(vevent, "TRANSP");
-            let timezone = extract_vevent_tzid(vevent, "DTSTART");
+                extract_vevent_field(&fields, "UID").unwrap_or_else(|| Uuid::new_v4().to_string());
+            let summary = extract_vevent_field(&fields, "SUMMARY");
+            let start_at = extract_vevent_field(&fields, "DTSTART").unwrap_or_default();
+            let end_at = extract_vevent_field(&fields, "DTEND").unwrap_or_default();
+            let location = extract_vevent_field(&fields, "LOCATION");
+            let description = extract_vevent_field(&fields, "DESCRIPTION");
+            let status = extract_vevent_field(&fields, "STATUS");
+            let rrule = extract_vevent_field(&fields, "RRULE");
+            let recurrence_id = extract_vevent_field(&fields, "RECURRENCE-ID");
+            let transp = extract_vevent_field(&fields, "TRANSP");
+            let timezone = extract_vevent_tzid(&fields, "DTSTART");
 
             let event_id = Uuid::new_v4().to_string();
             let _ = sqlx::query(
@@ -856,18 +858,20 @@ async fn upsert_raw_events(pool: &SqlitePool, cal_id: &str, raw_events: &[RawEve
     for raw in raw_events {
         let vevent_blocks = split_vevents(&raw.ical_data);
         for vevent in &vevent_blocks {
+            // Unfolded once for the field reads below (#267).
+            let fields = crate::utils::unfold_ical(vevent);
             let uid =
-                extract_vevent_field(vevent, "UID").unwrap_or_else(|| Uuid::new_v4().to_string());
-            let summary = extract_vevent_field(vevent, "SUMMARY");
-            let start_at = extract_vevent_field(vevent, "DTSTART").unwrap_or_default();
-            let end_at = extract_vevent_field(vevent, "DTEND").unwrap_or_default();
-            let location = extract_vevent_field(vevent, "LOCATION");
-            let description = extract_vevent_field(vevent, "DESCRIPTION");
-            let status = extract_vevent_field(vevent, "STATUS");
-            let rrule = extract_vevent_field(vevent, "RRULE");
-            let recurrence_id = extract_vevent_field(vevent, "RECURRENCE-ID");
-            let transp = extract_vevent_field(vevent, "TRANSP");
-            let timezone = extract_vevent_tzid(vevent, "DTSTART");
+                extract_vevent_field(&fields, "UID").unwrap_or_else(|| Uuid::new_v4().to_string());
+            let summary = extract_vevent_field(&fields, "SUMMARY");
+            let start_at = extract_vevent_field(&fields, "DTSTART").unwrap_or_default();
+            let end_at = extract_vevent_field(&fields, "DTEND").unwrap_or_default();
+            let location = extract_vevent_field(&fields, "LOCATION");
+            let description = extract_vevent_field(&fields, "DESCRIPTION");
+            let status = extract_vevent_field(&fields, "STATUS");
+            let rrule = extract_vevent_field(&fields, "RRULE");
+            let recurrence_id = extract_vevent_field(&fields, "RECURRENCE-ID");
+            let transp = extract_vevent_field(&fields, "TRANSP");
+            let timezone = extract_vevent_tzid(&fields, "DTSTART");
 
             let event_id = Uuid::new_v4().to_string();
             let _ = sqlx::query(
