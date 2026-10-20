@@ -609,7 +609,12 @@ pub(super) async fn dashboard_availability_default(
 ) -> impl IntoResponse {
     ensure_user_avail_seeded(&state.pool, &auth_user.user.id).await;
     let schedule = load_user_avail_schedule(&state.pool, &auth_user.user.id).await;
-    axum::Json(serde_json::json!({ "schedule": schedule }))
+    // The hours are read in the profile timezone, so "Reset to my default"
+    // on the event type form puts that timezone back too (#265).
+    axum::Json(serde_json::json!({
+        "schedule": schedule,
+        "timezone": auth_user.user.timezone,
+    }))
 }
 
 /// The editable half of the settings form, as it should be rendered back.
