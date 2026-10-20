@@ -173,6 +173,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 | Every timezone in every picker | 1.20.0 | All IANA zones grouped by region, with the common ones first, and a slot-page note when the clocks change before the day shown (#265) |
 | Attendees follow the booking | 1.20.0 | Additional attendees get updates when a reschedule is confirmed and cancellations when a booking ends; invites carry a SEQUENCE and fold long lines (#267) |
 
+## [1.20.1] - 2026-10-20
+
+Patch release with two fixes reported after 1.20.0. No migrations, no configuration change.
+
+Thanks to @cephbo and @Codrax for the reports.
+
+### Fixed
+
+- **"Back to times" lost the invite on private event types** (#275) - On an internal or private event type opened from an invite link, the booking form's back link dropped the invite token, so going back to the time slots showed a "forbidden" page. The link now keeps it, embedded pages included. Reported by @cephbo.
+- **"Reset to my default" kept the event type's timezone** (#265) - The button on the event type form loaded your profile's default hours but left the timezone selector alone, so those hours were read in another timezone. It now selects your profile timezone too. Reported by @Codrax.
+
 ## [1.20.0] - 2026-10-17
 
 Minor release. **Every timezone is now offered in every picker**, and slot pages say when the clocks change between today and the day shown, so a guest in Bucharest no longer has to pick a city that merely shares today's offset (#265). **Additional attendees now follow the booking**: their calendar copy moves when a reschedule is confirmed and is removed when the booking ends, and calendar invites carry a `SEQUENCE` so clients apply updates and cancellations in order (#267). The guest's phone and notes now survive every path that rebuilds a booking (#261, #266), and OIDC sign-in failures log why the provider's response did not parse, without logging tokens or personal data (#264). Two migrations (071 and 072), no configuration change. **Back up your database before upgrading.**
