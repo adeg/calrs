@@ -1377,6 +1377,19 @@ function sub(tpl, a, b) {
           schedule = parsed;
           renderSchedule();
           serializeSchedule();
+          // The default hours are in the profile timezone: select it too.
+          var tzSelect = document.getElementById('event_type_timezone');
+          if (data.timezone && tzSelect && tzSelect.value !== data.timezone) {
+            var found = Array.prototype.some.call(tzSelect.options, function(o) { return o.value === data.timezone; });
+            if (!found) {
+              var opt = document.createElement('option');
+              opt.value = data.timezone;
+              opt.textContent = data.timezone;
+              tzSelect.insertBefore(opt, tzSelect.firstChild);
+            }
+            tzSelect.value = data.timezone;
+            tzSelect.dispatchEvent(new Event('change', { bubbles: true }));
+          }
           btn.textContent = {{ t('etf-js-reset-done') | tojson }};
           btn.style.color = 'var(--success)';
           btn.style.borderColor = 'var(--success)';

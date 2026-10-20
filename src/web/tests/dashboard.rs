@@ -797,3 +797,23 @@ async fn dashboard_bookings_shows_guest_phone_while_pending() {
     let body = body_string(response).await;
     assert!(body.contains("Pending Guest") && !body.contains("+15550000002"));
 }
+
+/// "Reset to my default" on the event type form reads the profile hours and
+/// the timezone they are in, so it can select that timezone too (#265).
+#[tokio::test]
+async fn default_availability_carries_the_profile_timezone() {
+    let (app, pool, session, _) = setup_test_app().await;
+    sqlx::query("UPDATE users SET timezone = 'Europe/Bucharest'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(get_authed("/dashboard/availability/default", &session))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    assert_eq!(json["timezone"], "Europe/Bucharest");
+    assert!(json["schedule"].is_string());
+}
