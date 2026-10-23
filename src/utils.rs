@@ -291,11 +291,12 @@ pub fn extract_vevent_end(vevent: &str) -> Option<String> {
 
     let elapsed = chrono::Duration::try_seconds(duration.seconds)?;
 
-    let end_dt = match extract_vevent_tzid(vevent, "DTSTART") {
-        Some(tzid) => {
-            use chrono::TimeZone;
+    let zone = extract_vevent_tzid(vevent, "DTSTART")
+        .and_then(|tzid| tzid.parse::<chrono_tz::Tz>().ok());
 
-            let tz: chrono_tz::Tz = tzid.parse().ok()?;
+    let end_dt = match zone {
+        Some(tz) => {
+            use chrono::TimeZone;
 
             // Earliest selects the first occurrence of an ambiguous
             // local time. Nonexistent local times return None.
