@@ -116,7 +116,7 @@ pub fn extract_vevent_tzid(vevent: &str, field: &str) -> Option<String> {
             let after_tzid = &rest[tzid_pos + 5..];
             // TZID value ends at ':' or ';'
             let end = after_tzid.find([':', ';']).unwrap_or(after_tzid.len());
-            let tz = after_tzid[..end].trim();
+            let tz = after_tzid[..end].trim().trim_matches('"');
             if !tz.is_empty() {
                 return Some(tz.to_string());
             }
@@ -385,6 +385,16 @@ END:VCALENDAR";
         );
         assert_eq!(
             extract_vevent_tzid(vevent, "DTEND"),
+            Some("America/New_York".to_string())
+        );
+    }
+
+    #[test]
+    fn tzid_quoted_value() {
+        // RFC 5545 allows quoted parameter values; Outlook and DavMail always quote TZID.
+        let vevent = "BEGIN:VEVENT\nDTSTART;TZID=\"America/New_York\":20260924T140000\nEND:VEVENT";
+        assert_eq!(
+            extract_vevent_tzid(vevent, "DTSTART"),
             Some("America/New_York".to_string())
         );
     }
