@@ -355,6 +355,8 @@ pub fn extract_vevent_end(vevent: &str, zone: Option<Tz>) -> Option<String> {
 
     let elapsed = chrono::Duration::try_seconds(duration.seconds)?;
 
+    // A `Z` start is UTC whatever TZID sits beside it.
+    let zone = zone.filter(|_| !start.ends_with('Z'));
     let end_dt = match zone {
         Some(tz) => {
             use chrono::{Offset, TimeZone};
@@ -1159,6 +1161,18 @@ END:VEVENT";
     fn all_day_without_end_or_duration_lasts_one_day() {
         let event = "BEGIN:VEVENT\nDTSTART;VALUE=DATE:20261231\nEND:VEVENT";
         assert_eq!(end_of(event), Some("20270101".to_string()));
+    }
+
+    #[test]
+    fn utc_start_ignores_a_tzid_beside_it() {
+        // PT24H from a UTC start is 24 elapsed hours, even if a Paris TZID
+        // (which crosses its fall-back change here) is also written.
+        let event = "\
+BEGIN:VEVENT
+DTSTART;TZID=Europe/Paris:20261024T120000Z
+DURATION:PT24H
+END:VEVENT";
+        assert_eq!(end_of(event), Some("20261025T120000Z".to_string()));
     }
 
     #[test]
