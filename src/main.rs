@@ -27,6 +27,7 @@ mod sms;
 mod test_support;
 mod utils;
 mod web;
+mod windows_zones;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

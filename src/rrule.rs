@@ -217,14 +217,13 @@ pub fn extract_exdates(raw_ical: &str) -> Vec<NaiveDateTime> {
         let vevent = &raw_ical[vevent_start..vevent_end];
 
         for line in vevent.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("EXDATE") {
-                if let Some(colon) = trimmed.find(':') {
-                    let values = &trimmed[colon + 1..];
-                    for val in values.split(',') {
-                        if let Some(dt) = parse_exdate(val.trim()) {
-                            exdates.push(dt);
-                        }
+            let Some(parsed) = crate::utils::parse_content_line(line.trim()) else {
+                continue;
+            };
+            if parsed.name.eq_ignore_ascii_case("EXDATE") {
+                for val in parsed.value.split(',') {
+                    if let Some(dt) = parse_exdate(val.trim()) {
+                        exdates.push(dt);
                     }
                 }
             }
@@ -235,13 +234,12 @@ pub fn extract_exdates(raw_ical: &str) -> Vec<NaiveDateTime> {
     // These represent modified instances — the original occurrence should be excluded
     // from RRULE expansion (the modified instance is stored/displayed separately).
     for line in raw_ical.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("RECURRENCE-ID") {
-            if let Some(colon) = trimmed.find(':') {
-                let val = trimmed[colon + 1..].trim();
-                if let Some(dt) = parse_exdate(val) {
-                    exdates.push(dt);
-                }
+        let Some(parsed) = crate::utils::parse_content_line(line.trim()) else {
+            continue;
+        };
+        if parsed.name.eq_ignore_ascii_case("RECURRENCE-ID") {
+            if let Some(dt) = parse_exdate(parsed.value.trim()) {
+                exdates.push(dt);
             }
         }
     }
@@ -804,6 +802,14 @@ mod tests {
         let exdates = extract_exdates(ical);
         assert_eq!(exdates.len(), 1);
         assert_eq!(exdates[0], dt(2026, 3, 9, 10, 0));
+    }
+
+    /// #283: a quoted TZID holding ':' used to make the date unreadable.
+    #[test]
+    fn test_extract_exdates_quoted_tzid_with_colon() {
+        let ical = "BEGIN:VEVENT\nDTSTART:20260302T100000\nRRULE:FREQ=WEEKLY\nEXDATE;TZID=\"(UTC+01:00) Paris\":20260309T100000\nEND:VEVENT\nBEGIN:VEVENT\nRECURRENCE-ID;TZID=\"(UTC+01:00) Paris\":20260316T100000\nEND:VEVENT";
+        let exdates = extract_exdates(ical);
+        assert_eq!(exdates, vec![dt(2026, 3, 9, 10, 0), dt(2026, 3, 16, 10, 0)]);
     }
 
     #[test]
