@@ -70,15 +70,76 @@ pub fn unfold_ical(ical: &str) -> std::borrow::Cow<'_, str> {
     )
 }
 
+/// One iCal content line, `NAME;PARAM=VALUE;...:VALUE`, split per RFC 5545
+/// §3.1. A parameter value may be quoted, and a quoted value may contain `:`
+/// and `;` (Outlook writes `TZID="(UTC-05:00) Eastern Time"`), so the line
+/// cannot be cut at the first `:`. Parameter values come back unquoted.
+pub struct ContentLine<'a> {
+    pub name: &'a str,
+    params: Vec<(&'a str, &'a str)>,
+    pub value: &'a str,
+}
+
+impl ContentLine<'_> {
+    /// The value of a parameter, matched case-insensitively by name.
+    pub fn param(&self, name: &str) -> Option<&str> {
+        self.params
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| *v)
+    }
+}
+
+/// Split one unfolded content line. `None` when the line has no value
+/// separator outside quotes (malformed, or an unterminated quote).
+pub fn parse_content_line(line: &str) -> Option<ContentLine<'_>> {
+    let name_end = line.find([';', ':'])?;
+    let name = line[..name_end].trim();
+    let mut params = Vec::new();
+    let mut pos = name_end;
+    while line.as_bytes()[pos] == b';' {
+        let seg_start = pos + 1;
+        let mut in_quotes = false;
+        let mut seg_end = None;
+        for (i, c) in line[seg_start..].char_indices() {
+            match c {
+                '"' => in_quotes = !in_quotes,
+                ';' | ':' if !in_quotes => {
+                    seg_end = Some(seg_start + i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let seg_end = seg_end?;
+        let segment = &line[seg_start..seg_end];
+        if let Some((pname, pvalue)) = segment.split_once('=') {
+            let pvalue = pvalue.trim();
+            let pvalue = pvalue
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or(pvalue);
+            params.push((pname.trim(), pvalue));
+        }
+        pos = seg_end;
+    }
+    Some(ContentLine {
+        name,
+        params,
+        value: &line[pos + 1..],
+    })
+}
+
 /// Extract a field value from a single VEVENT block.
 pub fn extract_vevent_field(vevent: &str, field: &str) -> Option<String> {
     for line in unfold_ical(vevent).lines() {
-        if line.starts_with(field) {
-            if let Some(colon_pos) = line.find(':') {
-                let value = line[colon_pos + 1..].trim().to_string();
-                if !value.is_empty() {
-                    return Some(value);
-                }
+        let Some(parsed) = parse_content_line(line) else {
+            continue;
+        };
+        if parsed.name.eq_ignore_ascii_case(field) {
+            let value = parsed.value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
             }
         }
     }
@@ -88,46 +149,37 @@ pub fn extract_vevent_field(vevent: &str, field: &str) -> Option<String> {
 /// Extract the TZID from a DTSTART or DTEND line in a VEVENT block.
 ///
 /// - `DTSTART;TZID=Europe/Paris:20260310T100000` → `Some("Europe/Paris")`
+/// - `DTSTART;TZID="America/New_York":20260924T140000` → `Some("America/New_York")`
+/// - `DTSTART;TZID=Eastern Standard Time:...` → `Some("America/New_York")` (Windows name)
 /// - `DTSTART:20260310T100000Z` → `Some("UTC")`
 /// - `DTSTART:20260310T100000` (no TZID, no Z) → `None` (floating/local)
 /// - `DTSTART;VALUE=DATE:20260310` → `None` (all-day)
 pub fn extract_vevent_tzid(vevent: &str, field: &str) -> Option<String> {
     for line in unfold_ical(vevent).lines() {
-        if !line.starts_with(field) {
+        let Some(parsed) = parse_content_line(line) else {
             continue;
-        }
-        // Ensure we match the exact field, not a prefix (e.g. DTSTART vs DTSTART-EXTRA)
-        let rest = &line[field.len()..];
-        if rest.is_empty() {
-            continue;
-        }
-        let first = rest.as_bytes()[0];
-        if first != b';' && first != b':' {
+        };
+        if !parsed.name.eq_ignore_ascii_case(field) {
             continue;
         }
 
-        // Check for VALUE=DATE (all-day) — no timezone
-        if rest.contains("VALUE=DATE") {
+        // VALUE=DATE (all-day) carries no timezone. Matched whole, so the
+        // explicit VALUE=DATE-TIME some clients write stays timed.
+        if parsed
+            .param("VALUE")
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("DATE"))
+        {
             return None;
         }
 
-        // Check for TZID= parameter
-        if let Some(tzid_pos) = rest.find("TZID=") {
-            let after_tzid = &rest[tzid_pos + 5..];
-            // TZID value ends at ':' or ';'
-            let end = after_tzid.find([':', ';']).unwrap_or(after_tzid.len());
-            let tz = after_tzid[..end].trim();
+        if let Some(tz) = parsed.param("TZID").map(str::trim) {
             if !tz.is_empty() {
-                return Some(tz.to_string());
+                return Some(normalize_tzid(tz));
             }
         }
 
-        // Check for trailing Z (UTC)
-        if let Some(colon_pos) = rest.find(':') {
-            let value = rest[colon_pos + 1..].trim();
-            if value.ends_with('Z') {
-                return Some("UTC".to_string());
-            }
+        if parsed.value.trim().ends_with('Z') {
+            return Some("UTC".to_string());
         }
 
         // No TZID, no Z → floating
@@ -136,21 +188,27 @@ pub fn extract_vevent_tzid(vevent: &str, field: &str) -> Option<String> {
     None
 }
 
+/// Store a TZID as the IANA id it stands for when its name resolves
+/// (Windows name, vendor prefix, display name), and unchanged otherwise.
+fn normalize_tzid(tz: &str) -> String {
+    match crate::tzid::resolve(tz) {
+        Some(z) => z.name().to_string(),
+        None => tz.to_string(),
+    }
+}
+
 /// Convert a NaiveDateTime from the event's timezone to the target timezone.
 ///
-/// - If `event_tz` is `Some` and a valid IANA timezone → convert
+/// - If `event_tz` is `Some` and resolves (see `crate::tzid`) → convert
 /// - If `None` (floating) → return as-is (backward-compatible)
-/// - If IANA parse fails → return as-is (graceful degradation)
+/// - If the name is unknown → return as-is (graceful degradation)
 pub fn convert_event_to_tz(
     dt: NaiveDateTime,
     event_tz: Option<&str>,
     target_tz: Tz,
 ) -> NaiveDateTime {
-    let etz: Tz = match event_tz {
-        Some(tz_str) => match tz_str.parse::<Tz>() {
-            Ok(tz) => tz,
-            Err(_) => return dt,
-        },
+    let etz: Tz = match event_tz.and_then(crate::tzid::resolve_or_offset) {
+        Some(tz) => tz,
         None => return dt,
     };
 
@@ -555,6 +613,16 @@ END:VCALENDAR";
     }
 
     #[test]
+    fn tzid_quoted_value() {
+        // RFC 5545 allows quoted parameter values; Outlook and DavMail always quote TZID.
+        let vevent = "BEGIN:VEVENT\nDTSTART;TZID=\"America/New_York\":20260924T140000\nEND:VEVENT";
+        assert_eq!(
+            extract_vevent_tzid(vevent, "DTSTART"),
+            Some("America/New_York".to_string())
+        );
+    }
+
+    #[test]
     fn tzid_no_matching_field() {
         let vevent = "BEGIN:VEVENT\nDTEND;TZID=UTC:20260310T100000\nEND:VEVENT";
         assert_eq!(extract_vevent_tzid(vevent, "DTSTART"), None);
@@ -564,6 +632,85 @@ END:VCALENDAR";
     fn tzid_does_not_match_prefix() {
         let vevent = "BEGIN:VEVENT\nDTSTART-EXTRA;TZID=Europe/Paris:20260310T100000\nDTSTART:20260310T100000\nEND:VEVENT";
         assert_eq!(extract_vevent_tzid(vevent, "DTSTART"), None); // floating, not the -EXTRA line
+    }
+
+    /// #283: an explicit VALUE=DATE-TIME is a timed event, not an all-day one.
+    #[test]
+    fn tzid_value_date_time_is_not_all_day() {
+        let vevent = "BEGIN:VEVENT\nDTSTART;VALUE=DATE-TIME;TZID=America/New_York:20260924T140000\nEND:VEVENT";
+        assert_eq!(
+            extract_vevent_tzid(vevent, "DTSTART"),
+            Some("America/New_York".to_string())
+        );
+        let utc = "BEGIN:VEVENT\nDTSTART;VALUE=DATE-TIME:20260924T140000Z\nEND:VEVENT";
+        assert_eq!(extract_vevent_tzid(utc, "DTSTART"), Some("UTC".to_string()));
+    }
+
+    /// #283: a quoted TZID holding ':' and ';' does not cut the line short.
+    #[test]
+    fn quoted_param_with_colon_and_semicolon() {
+        let vevent =
+            "BEGIN:VEVENT\nDTSTART;TZID=\"(UTC-05:00) Eastern; US\":20260924T140000\nEND:VEVENT";
+        assert_eq!(
+            extract_vevent_tzid(vevent, "DTSTART"),
+            Some("(UTC-05:00) Eastern; US".to_string())
+        );
+        assert_eq!(
+            extract_vevent_field(vevent, "DTSTART"),
+            Some("20260924T140000".to_string())
+        );
+    }
+
+    /// #283: Outlook's Windows zone names are stored as the IANA id.
+    #[test]
+    fn tzid_windows_name_maps_to_iana() {
+        let vevent = "BEGIN:VEVENT\nDTSTART;TZID=Eastern Standard Time:20260924T140000\nEND:VEVENT";
+        assert_eq!(
+            extract_vevent_tzid(vevent, "DTSTART"),
+            Some("America/New_York".to_string())
+        );
+        let quoted =
+            "BEGIN:VEVENT\nDTSTART;TZID=\"W. Europe Standard Time\":20260924T140000\nEND:VEVENT";
+        assert_eq!(
+            extract_vevent_tzid(quoted, "DTSTART"),
+            Some("Europe/Berlin".to_string())
+        );
+    }
+
+    /// An unknown name is kept as written, so it still degrades to floating.
+    #[test]
+    fn tzid_unknown_name_kept() {
+        let vevent = "BEGIN:VEVENT\nDTSTART;TZID=Customized Time Zone:20260924T140000\nEND:VEVENT";
+        assert_eq!(
+            extract_vevent_tzid(vevent, "DTSTART"),
+            Some("Customized Time Zone".to_string())
+        );
+    }
+
+    // --- parse_content_line ---
+
+    #[test]
+    fn content_line_splits_name_params_value() {
+        let line =
+            parse_content_line("DTSTART;VALUE=DATE-TIME;tzid=\"A:B\":20260924T140000").unwrap();
+        assert_eq!(line.name, "DTSTART");
+        assert_eq!(line.param("VALUE"), Some("DATE-TIME"));
+        assert_eq!(line.param("TZID"), Some("A:B"));
+        assert_eq!(line.value, "20260924T140000");
+    }
+
+    #[test]
+    fn content_line_value_keeps_its_separators() {
+        let line = parse_content_line("RRULE:FREQ=WEEKLY;UNTIL=20261231T000000Z").unwrap();
+        assert_eq!(line.name, "RRULE");
+        assert_eq!(line.param("FREQ"), None);
+        assert_eq!(line.value, "FREQ=WEEKLY;UNTIL=20261231T000000Z");
+    }
+
+    #[test]
+    fn content_line_malformed() {
+        assert!(parse_content_line("END").is_none());
+        assert!(parse_content_line("DTSTART;TZID=\"unterminated:2026").is_none());
     }
 
     // --- convert_event_to_tz ---
@@ -620,6 +767,73 @@ END:VCALENDAR";
             "Europe/Paris".parse::<Tz>().unwrap(),
         );
         assert_eq!(result, dt); // unchanged
+    }
+
+    // --- tzdata (vendor/chrono-tz) ---
+
+    /// tzdata 2026a/b: British Columbia stays on -07 from 2026-11-01. Pins
+    /// the vendored data; chrono-tz 0.8.6's own 2024a would give -08.
+    #[test]
+    fn tzdata_vancouver_permanent_minus_seven() {
+        use chrono::{NaiveDate, Offset, TimeZone};
+        let at = |y, m, d| {
+            let utc = NaiveDate::from_ymd_opt(y, m, d)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap();
+            chrono_tz::America::Vancouver
+                .offset_from_utc_datetime(&utc)
+                .fix()
+                .local_minus_utc()
+                / 3600
+        };
+        assert_eq!(at(2026, 1, 15), -8);
+        assert_eq!(at(2026, 7, 15), -7);
+        assert_eq!(at(2026, 11, 15), -7);
+        assert_eq!(at(2027, 1, 15), -7);
+        // Neighbours keep their DST.
+        let la = |m| {
+            let utc = NaiveDate::from_ymd_opt(2026, m, 15)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap();
+            chrono_tz::America::Los_Angeles
+                .offset_from_utc_datetime(&utc)
+                .fix()
+                .local_minus_utc()
+                / 3600
+        };
+        assert_eq!(la(11), -8);
+    }
+
+    /// The vendored data is in rearguard form: numeric abbreviations are
+    /// spelled out, not the main form's literal `%z`.
+    #[test]
+    fn tzdata_numeric_abbreviations_are_spelled_out() {
+        use chrono::{NaiveDate, TimeZone};
+        use chrono_tz::OffsetName;
+        let utc = NaiveDate::from_ymd_opt(2026, 7, 15)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        let dubai = chrono_tz::Asia::Dubai.from_utc_datetime(&utc);
+        assert_eq!(dubai.offset().abbreviation(), "+04");
+    }
+
+    /// #283: an event stored with a Windows name before this fix still converts.
+    #[test]
+    fn convert_windows_name() {
+        use chrono::NaiveDate;
+        let dt = NaiveDate::from_ymd_opt(2026, 7, 15)
+            .unwrap()
+            .and_hms_opt(10, 0, 0)
+            .unwrap();
+        let result = convert_event_to_tz(
+            dt,
+            Some("Eastern Standard Time"),
+            "Europe/Paris".parse::<Tz>().unwrap(),
+        );
+        assert_eq!(result.hour(), 16);
     }
 
     // --- render_inline_markdown ---

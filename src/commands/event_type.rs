@@ -348,7 +348,7 @@ pub async fn run(pool: &SqlitePool, cmd: EventTypeCommands) -> Result<()> {
                 {
                     let exdates = raw_ical
                         .as_deref()
-                        .map(crate::rrule::extract_exdates)
+                        .map(|raw| crate::rrule::extract_exdates(raw, event_tz.as_deref()))
                         .unwrap_or_default();
                     let occurrences = crate::rrule::expand_rrule(
                         ev_start,
