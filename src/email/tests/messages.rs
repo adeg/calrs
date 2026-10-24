@@ -1322,7 +1322,7 @@ fn attendee_cancellation_of_a_pending_reschedule_has_a_translated_subject() {
     );
     assert_eq!(
         compose_attendee_cancellation(&details, "fr").subject,
-        "Annul\u{e9}e : 30min Intro"
+        "Annulation : 30min Intro"
     );
 }
 
@@ -1421,7 +1421,7 @@ fn host_booking_confirmed_is_written_in_the_host_language() {
     let mail = compose_host_booking_confirmed(&host_in(Some("fr")));
     assert_eq!(
         mail.subject,
-        "Confirmée : 30min Intro, Jane Doe (2026-04-10)"
+        "Confirmation : 30min Intro, Jane Doe (2026-04-10)"
     );
     assert!(mail.plain.starts_with("Réservation confirmée"));
     assert!(mail.html.contains("<html lang=\"fr\">"));
@@ -1480,7 +1480,10 @@ fn host_cancellation_is_written_in_the_host_language() {
         ..cancellation_from(&sample_booking_details())
     };
     let mail = compose_host_cancellation(&details);
-    assert_eq!(mail.subject, "Annulée : 30min Intro, Jane Doe (2026-04-10)");
+    assert_eq!(
+        mail.subject,
+        "Annulation : 30min Intro, Jane Doe (2026-04-10)"
+    );
     assert!(mail.plain.starts_with("Réservation annulée"));
     assert!(mail.plain.contains("Jane Doe a annulé sa réservation."));
     assert!(mail.plain.contains("Motif : Conflit"));
