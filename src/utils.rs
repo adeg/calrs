@@ -467,6 +467,57 @@ END:VCALENDAR";
         assert_eq!(result, dt); // unchanged
     }
 
+    // --- tzdata (vendor/chrono-tz) ---
+
+    /// tzdata 2026a/b: British Columbia stays on -07 from 2026-11-01. Pins
+    /// the vendored data; chrono-tz 0.8.6's own 2024a would give -08.
+    #[test]
+    fn tzdata_vancouver_permanent_minus_seven() {
+        use chrono::{NaiveDate, Offset, TimeZone};
+        let at = |y, m, d| {
+            let utc = NaiveDate::from_ymd_opt(y, m, d)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap();
+            chrono_tz::America::Vancouver
+                .offset_from_utc_datetime(&utc)
+                .fix()
+                .local_minus_utc()
+                / 3600
+        };
+        assert_eq!(at(2026, 1, 15), -8);
+        assert_eq!(at(2026, 7, 15), -7);
+        assert_eq!(at(2026, 11, 15), -7);
+        assert_eq!(at(2027, 1, 15), -7);
+        // Neighbours keep their DST.
+        let la = |m| {
+            let utc = NaiveDate::from_ymd_opt(2026, m, 15)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap();
+            chrono_tz::America::Los_Angeles
+                .offset_from_utc_datetime(&utc)
+                .fix()
+                .local_minus_utc()
+                / 3600
+        };
+        assert_eq!(la(11), -8);
+    }
+
+    /// The vendored data is in rearguard form: numeric abbreviations are
+    /// spelled out, not the main form's literal `%z`.
+    #[test]
+    fn tzdata_numeric_abbreviations_are_spelled_out() {
+        use chrono::{NaiveDate, TimeZone};
+        use chrono_tz::OffsetName;
+        let utc = NaiveDate::from_ymd_opt(2026, 7, 15)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        let dubai = chrono_tz::Asia::Dubai.from_utc_datetime(&utc);
+        assert_eq!(dubai.offset().abbreviation(), "+04");
+    }
+
     // --- render_inline_markdown ---
 
     #[test]
