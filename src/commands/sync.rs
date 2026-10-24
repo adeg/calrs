@@ -678,6 +678,7 @@ async fn upsert_provider_events(
     let mut count = 0u32;
     for raw in raw_events {
         let vevent_blocks = split_vevents(&raw.ical);
+        let mut zones = crate::tzid::ResourceZones::new(&raw.ical);
         for vevent in &vevent_blocks {
             // Unfolded once for the field reads below (#267).
             let fields = crate::utils::unfold_ical(vevent);
@@ -692,7 +693,7 @@ async fn upsert_provider_events(
             let rrule = extract_vevent_field(&fields, "RRULE");
             let recurrence_id = extract_vevent_field(&fields, "RECURRENCE-ID");
             let transp = extract_vevent_field(&fields, "TRANSP");
-            let timezone = crate::tzid::event_timezone(&raw.ical, &fields);
+            let timezone = zones.event_timezone(&fields);
 
             let event_id = Uuid::new_v4().to_string();
             let _ = sqlx::query(
@@ -859,6 +860,7 @@ async fn upsert_raw_events(pool: &SqlitePool, cal_id: &str, raw_events: &[RawEve
     let mut count = 0u32;
     for raw in raw_events {
         let vevent_blocks = split_vevents(&raw.ical_data);
+        let mut zones = crate::tzid::ResourceZones::new(&raw.ical_data);
         for vevent in &vevent_blocks {
             // Unfolded once for the field reads below (#267).
             let fields = crate::utils::unfold_ical(vevent);
@@ -873,7 +875,7 @@ async fn upsert_raw_events(pool: &SqlitePool, cal_id: &str, raw_events: &[RawEve
             let rrule = extract_vevent_field(&fields, "RRULE");
             let recurrence_id = extract_vevent_field(&fields, "RECURRENCE-ID");
             let transp = extract_vevent_field(&fields, "TRANSP");
-            let timezone = crate::tzid::event_timezone(&raw.ical_data, &fields);
+            let timezone = zones.event_timezone(&fields);
 
             let event_id = Uuid::new_v4().to_string();
             let _ = sqlx::query(

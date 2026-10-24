@@ -10,6 +10,7 @@
 //! - last, the fixed offset a display name starts with, `(UTC-05:00)`, which is
 //!   wrong across a DST change but closer than reading the time as host-local.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -34,23 +35,60 @@ pub fn resolve_or_offset(name: &str) -> Option<Tz> {
     resolve(name).or_else(|| fixed_offset(name))
 }
 
-/// The timezone to store for a VEVENT's DTSTART, given the whole resource it
-/// came from (where its `VTIMEZONE` lives). Returns the IANA id when the TZID
-/// resolves, the TZID unchanged when nothing does (read as floating time), and
-/// `None` for floating and all-day events.
-pub fn event_timezone(resource: &str, vevent: &str) -> Option<String> {
-    let tzid = crate::utils::extract_vevent_tzid(vevent, "DTSTART")?;
-    if let Some(tz) = resolve(&tzid) {
-        return Some(tz.name().to_string());
+/// The timezones of the VEVENTs of one resource (a CalDAV object, or a whole
+/// ICS feed), whose `VTIMEZONE` blocks they refer to. The resource is
+/// unfolded once, on the first TZID that needs it, and each (TZID, year)
+/// match is remembered, so a feed of thousands of events with a custom TZID
+/// is scanned once rather than once per event.
+pub struct ResourceZones<'a> {
+    resource: &'a str,
+    unfolded: Option<Cow<'a, str>>,
+    memo: HashMap<(String, i32), Option<Tz>>,
+}
+
+impl<'a> ResourceZones<'a> {
+    pub fn new(resource: &'a str) -> Self {
+        Self {
+            resource,
+            unfolded: None,
+            memo: HashMap::new(),
+        }
     }
-    let year = crate::utils::extract_vevent_field(vevent, "DTSTART")
-        .and_then(|v| parse_ical_datetime(&v))
-        .map(|dt| dt.year())
-        .unwrap_or_else(|| Utc::now().year());
-    from_vtimezone(resource, &tzid, year)
-        .or_else(|| fixed_offset(&tzid))
-        .map(|tz| tz.name().to_string())
-        .or(Some(tzid))
+
+    /// The timezone to store for a VEVENT's DTSTART. Returns the IANA id when
+    /// the TZID resolves, the TZID unchanged when nothing does (read as
+    /// floating time), and `None` for floating and all-day events.
+    pub fn event_timezone(&mut self, vevent: &str) -> Option<String> {
+        let tzid = crate::utils::extract_vevent_tzid(vevent, "DTSTART")?;
+        if let Some(tz) = resolve(&tzid) {
+            return Some(tz.name().to_string());
+        }
+        let year = crate::utils::extract_vevent_field(vevent, "DTSTART")
+            .and_then(|v| parse_ical_datetime(&v))
+            .map(|dt| dt.year())
+            .unwrap_or_else(|| Utc::now().year());
+        let key = (tzid, year);
+        let matched = match self.memo.get(&key) {
+            Some(hit) => *hit,
+            None => {
+                let resource = self.resource;
+                let unfolded = self.unfolded.get_or_insert_with(|| unfold_ical(resource));
+                let found = from_vtimezone(unfolded, &key.0, year);
+                self.memo.insert(key.clone(), found);
+                found
+            }
+        };
+        matched
+            .or_else(|| fixed_offset(&key.0))
+            .map(|tz| tz.name().to_string())
+            .or(Some(key.0))
+    }
+}
+
+/// [`ResourceZones::event_timezone`] for a single VEVENT.
+#[cfg(test)]
+fn event_timezone(resource: &str, vevent: &str) -> Option<String> {
+    ResourceZones::new(resource).event_timezone(vevent)
 }
 
 /// `/mozilla.org/20050126_1/Europe/Paris` → `Europe/Paris`: the longest
@@ -347,9 +385,9 @@ fn in_area(tz: &Tz) -> bool {
 /// shares one rule), and they convert that year's times identically; the
 /// pick prefers a zone whose city the TZID names, then the first zone CLDR
 /// maps a Windows name to, then any zone in an IANA area.
+/// `resource` must already be unfolded.
 fn from_vtimezone(resource: &str, tzid: &str, year: i32) -> Option<Tz> {
-    let resource = unfold_ical(resource);
-    let block = find_vtimezone(&resource, tzid)?;
+    let block = find_vtimezone(resource, tzid)?;
 
     static CACHE: OnceLock<Mutex<HashMap<(String, i32), Option<Tz>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -550,6 +588,27 @@ END:VCALENDAR\n";
             .map(|tz| tz.name()),
             Some("Europe/Brussels")
         );
+    }
+
+    /// One resolver per feed: the folded resource is unfolded once and the
+    /// match is reused for every event sharing the TZID.
+    #[test]
+    fn resource_zones_reuses_matches_across_events() {
+        let feed = OUTLOOK_EASTERN
+            .replace("TZID:Customized Time Zone\r\n", "TZID:Customized Time\r\n  Zone\r\n")
+            .replace(
+                "END:VEVENT\r\n",
+                "END:VEVENT\r\nBEGIN:VEVENT\r\nUID:y\r\nDTSTART;TZID=\"Customized Time Zone\":20260110T090000\r\nEND:VEVENT\r\n",
+            );
+        let mut zones = ResourceZones::new(&feed);
+        for vevent in crate::utils::split_vevents(&feed) {
+            let fields = crate::utils::unfold_ical(&vevent);
+            assert_eq!(
+                zones.event_timezone(&fields).as_deref(),
+                Some("America/New_York")
+            );
+        }
+        assert_eq!(zones.memo.len(), 1);
     }
 
     #[test]
