@@ -193,12 +193,16 @@ pub async fn sync_resource(
             extract_vevent_field(&fields, "UID").unwrap_or_else(|| Uuid::new_v4().to_string());
         let summary = extract_vevent_field(&fields, "SUMMARY");
         let start_at = extract_vevent_field(&fields, "DTSTART").unwrap_or_default();
-        let end_at = extract_vevent_field(&fields, "DTEND").unwrap_or_default();
         let status = extract_vevent_field(&fields, "STATUS");
         let rrule = extract_vevent_field(&fields, "RRULE");
         let recurrence_id = extract_vevent_field(&fields, "RECURRENCE-ID");
         let transp = extract_vevent_field(&fields, "TRANSP");
         let timezone = zones.event_timezone(&fields);
+        let end_at = crate::utils::extract_vevent_end(
+            &fields,
+            timezone.as_deref().and_then(crate::tzid::resolve_or_offset),
+        )
+        .unwrap_or_default();
         // All-day events use VALUE=DATE ("20260730"), timed use full stamps.
         let all_day = start_at.len() == 8 && start_at.chars().all(|c| c.is_ascii_digit());
 

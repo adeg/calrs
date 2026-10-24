@@ -686,7 +686,6 @@ async fn upsert_provider_events(
                 extract_vevent_field(&fields, "UID").unwrap_or_else(|| Uuid::new_v4().to_string());
             let summary = extract_vevent_field(&fields, "SUMMARY");
             let start_at = extract_vevent_field(&fields, "DTSTART").unwrap_or_default();
-            let end_at = extract_vevent_field(&fields, "DTEND").unwrap_or_default();
             let location = extract_vevent_field(&fields, "LOCATION");
             let description = extract_vevent_field(&fields, "DESCRIPTION");
             let status = extract_vevent_field(&fields, "STATUS");
@@ -694,6 +693,11 @@ async fn upsert_provider_events(
             let recurrence_id = extract_vevent_field(&fields, "RECURRENCE-ID");
             let transp = extract_vevent_field(&fields, "TRANSP");
             let timezone = zones.event_timezone(&fields);
+            let end_at = crate::utils::extract_vevent_end(
+                &fields,
+                timezone.as_deref().and_then(crate::tzid::resolve_or_offset),
+            )
+            .unwrap_or_default();
 
             let event_id = Uuid::new_v4().to_string();
             let _ = sqlx::query(
@@ -868,7 +872,6 @@ async fn upsert_raw_events(pool: &SqlitePool, cal_id: &str, raw_events: &[RawEve
                 extract_vevent_field(&fields, "UID").unwrap_or_else(|| Uuid::new_v4().to_string());
             let summary = extract_vevent_field(&fields, "SUMMARY");
             let start_at = extract_vevent_field(&fields, "DTSTART").unwrap_or_default();
-            let end_at = extract_vevent_field(&fields, "DTEND").unwrap_or_default();
             let location = extract_vevent_field(&fields, "LOCATION");
             let description = extract_vevent_field(&fields, "DESCRIPTION");
             let status = extract_vevent_field(&fields, "STATUS");
@@ -876,6 +879,11 @@ async fn upsert_raw_events(pool: &SqlitePool, cal_id: &str, raw_events: &[RawEve
             let recurrence_id = extract_vevent_field(&fields, "RECURRENCE-ID");
             let transp = extract_vevent_field(&fields, "TRANSP");
             let timezone = zones.event_timezone(&fields);
+            let end_at = crate::utils::extract_vevent_end(
+                &fields,
+                timezone.as_deref().and_then(crate::tzid::resolve_or_offset),
+            )
+            .unwrap_or_default();
 
             let event_id = Uuid::new_v4().to_string();
             let _ = sqlx::query(
@@ -1373,6 +1381,33 @@ mod tests {
             .bind(&source_id).bind(&account_id).execute(pool).await.unwrap();
 
         (source_id, et_id)
+    }
+
+    /// #282: Fastmail writes DURATION instead of DTEND. The stored end must be
+    /// derived, or the event never blocks a slot (the busy queries compare
+    /// end_at), and computed in the zone the TZID resolves to.
+    #[tokio::test]
+    async fn sync_stores_an_end_derived_from_duration() {
+        let pool = setup_test_db().await;
+        let (source_id, _) = seed_fixtures(&pool).await;
+        let cal_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO calendars (id, source_id, href, display_name, is_busy) VALUES (?, ?, '/c/', 'C', 1)")
+            .bind(&cal_id).bind(&source_id).execute(&pool).await.unwrap();
+
+        let ical = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:fastmail-1\r\nDTSTART;TZID=\"W. Europe Standard Time\":20261024T120000\r\nDURATION:PT24H\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let raw = vec![RawEvent {
+            href: "/c/fastmail-1.ics".to_string(),
+            ical_data: ical.to_string(),
+        }];
+        assert_eq!(upsert_raw_events(&pool, &cal_id, &raw).await, 1);
+
+        let (end_at, timezone): (String, Option<String>) =
+            sqlx::query_as("SELECT end_at, timezone FROM events WHERE uid = 'fastmail-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(end_at, "20261025T110000");
+        assert_eq!(timezone.as_deref(), Some("Europe/Berlin"));
     }
 
     /// Regression test for issue #44: a pending booking whose CalDAV event was deleted
