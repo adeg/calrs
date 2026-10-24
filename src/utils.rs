@@ -188,28 +188,18 @@ pub fn extract_vevent_tzid(vevent: &str, field: &str) -> Option<String> {
     None
 }
 
-/// Resolve a stored or iCal timezone name: an IANA id, or a Windows name
-/// (`Eastern Standard Time`) as Outlook and Exchange write it.
-pub fn resolve_tz(name: &str) -> Option<Tz> {
-    name.parse::<Tz>()
-        .ok()
-        .or_else(|| crate::windows_zones::from_windows(name))
-}
-
-/// Store a TZID as the IANA id it stands for when it is a Windows name, and
-/// unchanged otherwise (an unknown name still degrades to floating time).
+/// Store a TZID as the IANA id it stands for when its name resolves
+/// (Windows name, vendor prefix, display name), and unchanged otherwise.
 fn normalize_tzid(tz: &str) -> String {
-    match tz.parse::<Tz>() {
-        Ok(_) => tz.to_string(),
-        Err(_) => crate::windows_zones::from_windows(tz)
-            .map(|z| z.name().to_string())
-            .unwrap_or_else(|| tz.to_string()),
+    match crate::tzid::resolve(tz) {
+        Some(z) => z.name().to_string(),
+        None => tz.to_string(),
     }
 }
 
 /// Convert a NaiveDateTime from the event's timezone to the target timezone.
 ///
-/// - If `event_tz` is `Some` and a valid IANA (or Windows) timezone → convert
+/// - If `event_tz` is `Some` and resolves (see `crate::tzid`) → convert
 /// - If `None` (floating) → return as-is (backward-compatible)
 /// - If the name is unknown → return as-is (graceful degradation)
 pub fn convert_event_to_tz(
@@ -217,7 +207,7 @@ pub fn convert_event_to_tz(
     event_tz: Option<&str>,
     target_tz: Tz,
 ) -> NaiveDateTime {
-    let etz: Tz = match event_tz.and_then(resolve_tz) {
+    let etz: Tz = match event_tz.and_then(crate::tzid::resolve_or_offset) {
         Some(tz) => tz,
         None => return dt,
     };

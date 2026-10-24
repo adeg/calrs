@@ -21,10 +21,7 @@ use chrono_tz::Tz;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-use crate::utils::{
-    convert_event_to_tz, extract_vevent_field, extract_vevent_tzid, parse_ical_datetime,
-    split_vevents,
-};
+use crate::utils::{convert_event_to_tz, extract_vevent_field, parse_ical_datetime, split_vevents};
 
 /// Re-sync a resource feed when older than this many minutes.
 pub const SYNC_STALE_MINUTES: i64 = 5;
@@ -200,7 +197,7 @@ pub async fn sync_resource(
         let rrule = extract_vevent_field(&fields, "RRULE");
         let recurrence_id = extract_vevent_field(&fields, "RECURRENCE-ID");
         let transp = extract_vevent_field(&fields, "TRANSP");
-        let timezone = extract_vevent_tzid(&fields, "DTSTART");
+        let timezone = crate::tzid::event_timezone(&body, &fields);
         // All-day events use VALUE=DATE ("20260730"), timed use full stamps.
         let all_day = start_at.len() == 8 && start_at.chars().all(|c| c.is_ascii_digit());
 

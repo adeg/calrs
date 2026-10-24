@@ -163,6 +163,13 @@ pub fn from_windows(name: &str) -> Option<Tz> {
         .and_then(|(_, iana)| iana.parse().ok())
 }
 
+/// The zones CLDR maps Windows names to, in CLDR order: the usual
+/// representative of each region (`America/New_York` before
+/// `America/Grand_Turk`, `Europe/Berlin` rather than `Europe/Busingen`).
+pub fn default_zones() -> impl Iterator<Item = &'static str> {
+    WINDOWS_ZONES.iter().map(|(_, zone)| *zone)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

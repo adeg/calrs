@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::caldav::{CaldavClient, RawEvent};
 use crate::providers::{factory::kinds, RawEvent as ProviderRawEvent};
-use crate::utils::{extract_vevent_field, extract_vevent_tzid, split_vevents};
+use crate::utils::{extract_vevent_field, split_vevents};
 
 /// Default staleness threshold: 5 minutes
 const STALE_SECS: i64 = 300;
@@ -692,7 +692,7 @@ async fn upsert_provider_events(
             let rrule = extract_vevent_field(&fields, "RRULE");
             let recurrence_id = extract_vevent_field(&fields, "RECURRENCE-ID");
             let transp = extract_vevent_field(&fields, "TRANSP");
-            let timezone = extract_vevent_tzid(&fields, "DTSTART");
+            let timezone = crate::tzid::event_timezone(&raw.ical, &fields);
 
             let event_id = Uuid::new_v4().to_string();
             let _ = sqlx::query(
@@ -873,7 +873,7 @@ async fn upsert_raw_events(pool: &SqlitePool, cal_id: &str, raw_events: &[RawEve
             let rrule = extract_vevent_field(&fields, "RRULE");
             let recurrence_id = extract_vevent_field(&fields, "RECURRENCE-ID");
             let transp = extract_vevent_field(&fields, "TRANSP");
-            let timezone = extract_vevent_tzid(&fields, "DTSTART");
+            let timezone = crate::tzid::event_timezone(&raw.ical_data, &fields);
 
             let event_id = Uuid::new_v4().to_string();
             let _ = sqlx::query(
