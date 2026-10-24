@@ -314,20 +314,26 @@ struct IcalDuration {
 /// Supports:
 /// P1W, P2D, P1DT2H30M, PT7H, PT30M, PT45S.
 ///
-/// Calendar days are applied before elapsed hours/minutes/seconds.
-/// Existing DTEND values are returned unchanged.
-pub fn extract_vevent_end(vevent: &str) -> Option<String> {
+/// Calendar days are applied before elapsed hours/minutes/seconds, in
+/// `zone`, the event's resolved timezone (`None` for floating and UTC
+/// times). Existing DTEND values are returned unchanged. An all-day event
+/// with neither lasts one day (RFC 5545 §3.6.1).
+pub fn extract_vevent_end(vevent: &str, zone: Option<Tz>) -> Option<String> {
     if let Some(end) = extract_vevent_field(vevent, "DTEND") {
         return Some(end);
     }
 
     let start = extract_vevent_field(vevent, "DTSTART")?;
-    let raw_duration = extract_vevent_field(vevent, "DURATION")?;
-    let duration = parse_ical_duration(&raw_duration)?;
     let start_dt = parse_ical_datetime(&start)?;
-
     let timed = start.contains('T');
     let iso = start.contains('-');
+
+    let raw_duration = match extract_vevent_field(vevent, "DURATION") {
+        Some(raw) => raw,
+        None if !timed => "P1D".to_string(),
+        None => return None,
+    };
+    let duration = parse_ical_duration(&raw_duration)?;
 
     // DATE-valued events only permit day/week durations.
     // Checking the syntax also rejects P1DT0H on an all-day event.
@@ -349,16 +355,24 @@ pub fn extract_vevent_end(vevent: &str) -> Option<String> {
 
     let elapsed = chrono::Duration::try_seconds(duration.seconds)?;
 
-    let zone = extract_vevent_tzid(vevent, "DTSTART")
-        .and_then(|tzid| tzid.parse::<chrono_tz::Tz>().ok());
-
     let end_dt = match zone {
         Some(tz) => {
-            use chrono::TimeZone;
+            use chrono::{Offset, TimeZone};
 
-            // Earliest selects the first occurrence of an ambiguous
-            // local time. Nonexistent local times return None.
-            let zoned = tz.from_local_datetime(&after_days).earliest()?;
+            // Earliest selects the first occurrence of an ambiguous local
+            // time. A time skipped by a spring-forward change takes the
+            // offset from before the change (RFC 5545 §3.3.5).
+            let zoned = match tz.from_local_datetime(&after_days).earliest() {
+                Some(zoned) => zoned,
+                None => {
+                    let before = tz
+                        .from_local_datetime(&(after_days - chrono::Duration::hours(3)))
+                        .earliest()?
+                        .offset()
+                        .fix();
+                    tz.from_utc_datetime(&(after_days - before))
+                }
+            };
 
             // Elapsed-time addition respects any DST transition.
             zoned.checked_add_signed(elapsed)?.naive_local()
@@ -1025,6 +1039,12 @@ END:VCALENDAR";
 mod duration_tests {
     use super::*;
 
+    /// The zone the sync passes: the DTSTART TZID, resolved.
+    fn end_of(event: &str) -> Option<String> {
+        let zone = extract_vevent_tzid(event, "DTSTART").and_then(|t| crate::tzid::resolve(&t));
+        extract_vevent_end(event, zone)
+    }
+
     #[test]
     fn derives_end_from_duration() {
         let cases = [
@@ -1050,7 +1070,7 @@ mod duration_tests {
             let event = format!("BEGIN:VEVENT\n{start}\nDURATION:{duration}\nEND:VEVENT");
 
             assert_eq!(
-                extract_vevent_end(&event),
+                end_of(&event),
                 Some(expected.to_string()),
                 "{start}, {duration}",
             );
@@ -1067,11 +1087,7 @@ mod duration_tests {
                  END:VEVENT"
             );
 
-            assert_eq!(
-                extract_vevent_end(&event),
-                Some(expected.to_string()),
-                "{duration}",
-            );
+            assert_eq!(end_of(&event), Some(expected.to_string()), "{duration}",);
         }
     }
 
@@ -1083,10 +1099,7 @@ DTSTART:20261027T161500Z
 DTEND:20261027T171500Z
 END:VEVENT";
 
-        assert_eq!(
-            extract_vevent_end(event),
-            Some("20261027T171500Z".to_string()),
-        );
+        assert_eq!(end_of(event), Some("20261027T171500Z".to_string()),);
     }
 
     #[test]
@@ -1112,6 +1125,45 @@ DTSTART;VALUE=DATE:20261027
 DURATION:PT24H
 END:VEVENT";
 
-        assert_eq!(extract_vevent_end(event), None);
+        assert_eq!(end_of(event), None);
+    }
+
+    #[test]
+    fn duration_follows_a_windows_tzid() {
+        // P1D keeps the wall time; PT24H crosses the Paris fall-back change.
+        for (duration, expected) in [("P1D", "20261025T120000"), ("PT24H", "20261025T110000")] {
+            let event = format!(
+                "BEGIN:VEVENT\n\
+                 DTSTART;TZID=\"W. Europe Standard Time\":20261024T120000\n\
+                 DURATION:{duration}\n\
+                 END:VEVENT"
+            );
+            assert_eq!(end_of(&event), Some(expected.to_string()), "{duration}");
+        }
+    }
+
+    #[test]
+    fn duration_from_a_time_skipped_by_spring_forward() {
+        // 02:30 does not exist in Paris on 2026-03-29: it is read with the
+        // offset from before the change (+01:00), so 01:30 UTC, and an hour
+        // later is 02:30 UTC, 04:30 local.
+        let event = "\
+BEGIN:VEVENT
+DTSTART;TZID=Europe/Paris:20260329T023000
+DURATION:PT1H
+END:VEVENT";
+        assert_eq!(end_of(event), Some("20260329T043000".to_string()));
+    }
+
+    #[test]
+    fn all_day_without_end_or_duration_lasts_one_day() {
+        let event = "BEGIN:VEVENT\nDTSTART;VALUE=DATE:20261231\nEND:VEVENT";
+        assert_eq!(end_of(event), Some("20270101".to_string()));
+    }
+
+    #[test]
+    fn timed_without_end_or_duration_has_no_end() {
+        let event = "BEGIN:VEVENT\nDTSTART:20261027T161500Z\nEND:VEVENT";
+        assert_eq!(end_of(event), None);
     }
 }
