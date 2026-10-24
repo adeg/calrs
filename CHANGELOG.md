@@ -173,6 +173,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 | Every timezone in every picker | 1.20.0 | All IANA zones grouped by region, with the common ones first, and a slot-page note when the clocks change before the day shown (#265) |
 | Attendees follow the booking | 1.20.0 | Additional attendees get updates when a reschedule is confirmed and cancellations when a booking ends; invites carry a SEQUENCE and fold long lines (#267) |
 
+## [1.20.2] - 2026-10-24
+
+Patch release. **Upgrade before 2026-11-01** if you or your guests use the British Columbia timezone (`America/Vancouver`): the bundled timezone data dated from 2024, and British Columbia stays on UTC-7 from that night instead of falling back. The rest are fixes to how synced calendar events are placed in time, starting with Outlook and DavMail calendars whose events were shown at the wrong hour. No migrations, no configuration change.
+
+**After upgrading, run a full sync** (`calrs sync --full`, or wait for the daily full resync) so events already in the cache are read again with the fixes below.
+
+Thanks to @jludwig for the report and the first fix.
+
+### Fixed
+
+- **Timezone data updated to IANA 2026b** (#285, #286) - calrs bundled tzdata 2024a, and no `chrono-tz` release carries newer data yet. British Columbia moves to permanent UTC-7 on 2026-11-01, so from that night every Vancouver time (slots, busy times, emails, invites) would have been an hour off. calrs now builds with a vendored `chrono-tz` carrying 2026b, which also brings Paraguay, Chile's Aysén Region and Moldova up to date. Longer-term options are discussed in #285.
+- **Events with a quoted timezone landed in the host's timezone** (#279, #280) - Outlook and DavMail write `TZID="America/New_York"` with quotes, which RFC 5545 allows. The quotes were kept, the timezone was not recognised, and the event was read as the host's local time, so it blocked the wrong hours and left its real slot open. Reported and fixed by @jludwig.
+- **More timezone forms are recognised** (#283, #284) - Synced events are now placed correctly when their timezone is:
+  - written alongside `VALUE=DATE-TIME`, which was mistaken for an all-day event;
+  - quoted and containing `:` or `;`, such as `"(UTC-05:00) Eastern Time"`, which cut the line short and could also break the date itself, exception dates and modified occurrences of recurring events;
+  - a Windows name such as `Eastern Standard Time` (Outlook, Exchange), mapped through the CLDR table;
+  - an IANA name behind a vendor prefix, such as `/mozilla.org/20050126_1/Europe/Paris` (older Thunderbird, Evolution);
+  - a Windows display name such as `(UTC+01:00) Amsterdam, Berlin, ...`;
+  - a custom name such as `Customized Time Zone`, matched at sync against the event's own `VTIMEZONE`.
+
+  Windows names, vendor prefixes and display names are also recognised on events already synced; the other cases need the full sync above.
+- **Cancelled occurrences of recurring events could still block time** (#283, #284) - An exception date or modified occurrence written in UTC or in another timezone than the event (`EXDATE:20260308T233000Z` on a weekly 00:30 Paris meeting) was compared without conversion, so the cancelled occurrence stayed busy. It is now converted to the event's timezone first.
+
+### Internal
+
+- One quote-aware iCal line parser (`parse_content_line`) now backs every property reader, and `src/tzid.rs` owns timezone resolution.
+- `vendor/chrono-tz/CALRS.md` lists the changes to the vendored crate and how to refresh its data.
+
 ## [1.20.1] - 2026-10-20
 
 Patch release with two fixes reported after 1.20.0. No migrations, no configuration change.
