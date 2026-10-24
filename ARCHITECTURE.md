@@ -53,7 +53,9 @@ Every user-facing string goes through Fluent (`i18n/`).
 | `src/i18n.rs` | Fluent loader, language detection, the `t()` template global, i18n guard tests |
 | `src/booking_time.rs` | How booking times are stored (legacy wall clock vs UTC instant) |
 | `src/rrule.rs` | RRULE expansion for recurring events |
-| `src/utils.rs` | iCal helpers (`split_vevents`, `extract_vevent_field`, datetime parsing) |
+| `src/utils.rs` | iCal helpers (`split_vevents`, `parse_content_line`, `extract_vevent_field`, `extract_vevent_tzid`, datetime and timezone parsing) |
+| `src/tzid.rs` | Resolving an event's TZID to an IANA zone: by name (IANA, Windows, vendor prefix, display name), else by matching the resource's `VTIMEZONE`, else a display name's fixed offset (`event_timezone` at sync, `resolve_or_offset` when reading stored events) |
+| `src/windows_zones.rs` | Windows timezone names (`Eastern Standard Time`) mapped to IANA ids, from CLDR's `windowsZones.xml` |
 | `src/resources.rs` | Shared bookable resources: feed sync, busy intervals, pick at booking time |
 | `src/google_meet.rs` | Google Meet links through the Google Calendar API |
 | `src/oauth2_caldav.rs` | Google OAuth2 tokens for CalDAV access |
