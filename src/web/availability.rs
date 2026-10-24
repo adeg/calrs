@@ -525,7 +525,7 @@ pub(crate) fn expand_recurring_into_busy(
         if let (Some(ev_start), Some(ev_end)) = (parse_ical_datetime(s), parse_ical_datetime(e)) {
             let exdates = raw_ical
                 .as_deref()
-                .map(crate::rrule::extract_exdates)
+                .map(|raw| crate::rrule::extract_exdates(raw, event_tz.as_deref()))
                 .unwrap_or_default();
             // Expand RRULE in the event's own timezone (correct for DST)
             let occurrences = crate::rrule::expand_rrule(
@@ -2177,7 +2177,7 @@ pub(super) async fn troubleshoot(
         if let (Some(ev_start), Some(ev_end)) = (parse_ical_datetime(s), parse_ical_datetime(e)) {
             let exdates = raw_ical
                 .as_deref()
-                .map(crate::rrule::extract_exdates)
+                .map(|raw| crate::rrule::extract_exdates(raw, event_tz.as_deref()))
                 .unwrap_or_default();
             let occurrences = crate::rrule::expand_rrule(
                 ev_start,
