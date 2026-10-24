@@ -173,13 +173,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 | Every timezone in every picker | 1.20.0 | All IANA zones grouped by region, with the common ones first, and a slot-page note when the clocks change before the day shown (#265) |
 | Attendees follow the booking | 1.20.0 | Additional attendees get updates when a reschedule is confirmed and cancellations when a booking ends; invites carry a SEQUENCE and fold long lines (#267) |
 
-## [Unreleased]
+## [1.20.3] - 2026-10-24
+
+Patch release. The main fix is for calendars that give an event's length as a `DURATION` instead of an end time, as Fastmail does: those events blocked nothing, so their slots were offered to guests. No migrations, no configuration change.
+
+**After upgrading, run a full sync** (`calrs sync --full`, or wait for the daily full resync) so events already in the cache get their end time.
+
+Thanks to @AudunBeck, @frenchcharly and @chetan for their pull requests, and to @Codrax for spotting the doubled scope.
 
 ### Fixed
 
-- **OIDC token endpoint refusals are now readable in the logs** (#264) - When a provider's token endpoint answers with something other than JSON, the `oidc auth failure: token response did not parse` line now carries the HTTP status and, for a short plain-text refusal, its text. A 200 body is still never echoed.
-- **`client_secret_post` providers** (#264) - When the discovery document lists `client_secret_post` but not `client_secret_basic`, calrs now sends the client credentials in the token request body instead of an HTTP Basic header.
-- **`openid` was sent twice in the scope** (#264) - Spotted by @Codrax.
+- **Events with a `DURATION` instead of a `DTEND` blocked nothing** (#282) - Fastmail, among others, writes `DURATION:PT1H` rather than an end time, which RFC 5545 allows. calrs stored an empty end, so the event showed no end in `calrs calendar show` and, worse, the busy-time checks skipped it and its slot stayed bookable. The end is now derived from the start and the duration, in the event's own timezone (days keep the wall time across a clock change, hours count elapsed time), for calendar sources and shared resource feeds alike. An all-day event with neither lasts one day, as RFC 5545 says, and now blocks that day where it used to block nothing. Reported and fixed by @AudunBeck.
+- **OIDC token endpoint refusals are now readable in the logs** (#264, #278) - When a provider's token endpoint answers with something other than JSON, the `oidc auth failure: token response did not parse` line now carries the HTTP status and, for a short plain-text refusal, its text. A 200 body is still never echoed.
+- **`client_secret_post` providers** (#264, #278) - When the discovery document lists `client_secret_post` but not `client_secret_basic`, calrs now sends the client credentials in the token request body instead of an HTTP Basic header.
+- **`openid` was sent twice in the scope** (#264, #278) - Spotted by @Codrax.
+- **Calendar sources page on phones** (#281) - Source details and actions now stack on small screens, with larger buttons, a full-width sync error, and long URLs that wrap. By @chetan.
+- **French email subjects** (#288) - "Annulée :", "Confirmée :" and "Expirée :" read as agreeing with the event's name, which is usually masculine; they are now "Annulation :", "Confirmation :" and "Expiration :". By @frenchcharly.
+
+### Internal
+
+- Two booking tests booked three days out, which lands on a weekend on Wednesdays and Thursdays; they now book on the next Monday.
 
 ## [1.20.2] - 2026-10-24
 
