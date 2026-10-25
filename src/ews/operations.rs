@@ -247,9 +247,7 @@ async fn list_items_window(
         // server may cut short (`IncludesLastItemInRange="false"`, or its
         // entry cap reached) without an error.
         if start_utc.is_some() {
-            let complete = page.includes_last != Some(false)
-                && included < CALENDAR_VIEW_CAP
-                && total.is_none_or(|t| t <= included as u64);
+            let complete = calendar_view_complete(page.includes_last, included, total);
             return Ok((all, complete));
         }
         if included == 0 {
@@ -266,6 +264,25 @@ async fn list_items_window(
     }
     tracing::debug!(folder = %folder_id, count = all.len(), "EWS FindItem complete");
     Ok((all, true))
+}
+
+/// Whether a CalendarView answer holds every item of its window. The
+/// server's own `IncludesLastItemInRange` decides when it is sent; the item
+/// total is only a fallback, since a server counting it differently would
+/// otherwise make every window look cut short. An answer at the entry cap is
+/// never trusted.
+fn calendar_view_complete(
+    includes_last: Option<bool>,
+    included: usize,
+    total: Option<u64>,
+) -> bool {
+    if included >= CALENDAR_VIEW_CAP {
+        return false;
+    }
+    match includes_last {
+        Some(flag) => flag,
+        None => total.is_none_or(|t| t <= included as u64),
+    }
 }
 
 /// Fetch the MIME (RFC 5322 + iCalendar) representation of one or more items.
@@ -961,5 +978,18 @@ mod tests {
             .unwrap();
             assert_eq!(found, ["TARGET"], "missed sync-window day {offset}");
         }
+    }
+
+    #[test]
+    fn calendar_view_completeness_prefers_the_servers_flag() {
+        assert!(calendar_view_complete(Some(true), 5, Some(5)));
+        assert!(!calendar_view_complete(Some(false), 5, Some(5)));
+        // The flag wins over a total counted differently.
+        assert!(calendar_view_complete(Some(true), 5, Some(9)));
+        // Without the flag, the total decides.
+        assert!(!calendar_view_complete(None, 5, Some(9)));
+        assert!(calendar_view_complete(None, 5, None));
+        // At the cap, nothing is trusted.
+        assert!(!calendar_view_complete(Some(true), CALENDAR_VIEW_CAP, None));
     }
 }
