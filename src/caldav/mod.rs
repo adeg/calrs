@@ -745,9 +745,10 @@ fn propfind_resource_exists(xml: &str) -> Option<bool> {
 ///
 /// Used by `parse_sync_response` to isolate the resource-level `<d:status>` from
 /// any property-level statuses nested inside propstat elements. Accepts any
-/// namespace prefix `extract_tag` accepts (`is_xml_prefix`): a propstat left in
-/// place would have its property 404 read as "the resource is gone". Tolerates
-/// malformed XML (leaves an unmatched open tag in place) rather than failing.
+/// namespace prefix, a wider set than `extract_tag` reads (`is_xml_prefix`): a
+/// propstat left in place would have its property 404 read as "the resource is
+/// gone", while stripping one too many only hides a status. Tolerates malformed
+/// XML (leaves an unmatched open tag in place) rather than failing.
 fn strip_propstat_blocks(s: &str) -> String {
     strip_propstat(s).0
 }
@@ -755,78 +756,105 @@ fn strip_propstat_blocks(s: &str) -> String {
 /// `strip_propstat_blocks`, also counting the propstat elements with content
 /// that were removed (a self-closing `<propstat/>` is dropped but not counted).
 fn strip_propstat(s: &str) -> (String, usize) {
+    // Where each propstat close tag last appears, so an open tag with no close
+    // after it is skipped without searching the rest of the input.
+    let last_close = last_propstat_closes(s);
     let mut result = String::with_capacity(s.len());
     let mut rest = s;
     let mut removed = 0;
-    // Tag names with no close tag left in the input: a later open tag of the
-    // same name has none either, so it is not searched for again.
-    let mut unclosed: Vec<String> = Vec::new();
     while let Some((start, name)) = find_propstat_open(rest) {
-        let Some(open_len) = open_tag_len(&rest[start..]) else {
-            break;
-        };
-        if rest[start..start + open_len].ends_with("/>") {
+        let at = s.len() - rest.len() + start;
+        let open_len = open_tag_len(&rest[start..]);
+        if let Some(len) = open_len.filter(|&len| rest[start..start + len].ends_with("/>")) {
             // `<propstat/>` is a whole element with nothing inside.
             result.push_str(&rest[..start]);
-            rest = &rest[start + open_len..];
+            rest = &rest[start + len..];
             continue;
         }
-        let close = if unclosed.contains(&name) {
-            None
-        } else {
-            find_element_close(&rest[start + open_len..], &name)
-        };
-        let Some((close_start, close_len)) = close else {
-            // Malformed, no close tag: keep this one and look for the next.
-            if !unclosed.contains(&name) {
-                unclosed.push(name);
+        let close = open_len
+            .filter(|&len| last_close.get(name).is_some_and(|&c| c >= at + len))
+            .and_then(|len| {
+                let (close_start, close_len) = find_element_close(&rest[start + len..], name)?;
+                Some(start + len + close_start + close_len)
+            });
+        match close {
+            Some(end) => {
+                result.push_str(&rest[..start]);
+                rest = &rest[end..];
+                removed += 1;
             }
-            result.push_str(&rest[..=start]);
-            rest = &rest[start + 1..];
-            continue;
-        };
-        result.push_str(&rest[..start]);
-        rest = &rest[start + open_len + close_start + close_len..];
-        removed += 1;
+            None => {
+                // Malformed, or not a tag at all: keep it and look further.
+                result.push_str(&rest[..=start]);
+                rest = &rest[start + 1..];
+            }
+        }
     }
     result.push_str(rest);
     (result, removed)
 }
 
+/// The XML name starting at `s`: letters, digits, `_`, `-`, `.` and `:`.
+fn xml_name(s: &str) -> &str {
+    let end = s
+        .find(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')))
+        .unwrap_or(s.len());
+    &s[..end]
+}
+
+/// Whether `name` is `propstat` under no prefix or any one prefix.
+fn is_propstat_name(name: &str) -> bool {
+    name == "propstat"
+        || name
+            .strip_suffix(":propstat")
+            .is_some_and(|prefix| !prefix.is_empty() && !prefix.contains(':'))
+}
+
 /// Find the first `<propstat` or `<prefix:propstat` open tag in `s`, returning
 /// where its `<` is and the tag name with its prefix. A longer name such as
 /// `<d:propstats>` does not count, and neither do close tags.
-fn find_propstat_open(s: &str) -> Option<(usize, String)> {
-    let bytes = s.as_bytes();
-    for (idx, _) in s.match_indices("propstat") {
-        let after = bytes.get(idx + "propstat".len()).copied();
-        if !matches!(after, Some(b'>' | b' ' | b'\t' | b'\n' | b'\r' | b'/')) {
-            continue;
-        }
-        match idx.checked_sub(1).map(|i| bytes[i]) {
-            Some(b'<') => return Some((idx - 1, "propstat".to_string())),
-            Some(b':') => {
-                // A prefix is at most 10 characters, so look no further back.
-                let head = &s[..idx - 1];
-                let lt = head.char_indices().rev().take(11).find(|&(_, c)| c == '<');
-                if let Some((lt, _)) = lt {
-                    if is_xml_prefix(&head[lt + 1..]) {
-                        return Some((lt, s[lt + 1..idx + "propstat".len()].to_string()));
-                    }
-                }
-            }
-            _ => {}
+fn find_propstat_open(s: &str) -> Option<(usize, &str)> {
+    for (lt, _) in s.match_indices('<') {
+        let name = xml_name(&s[lt + 1..]);
+        let after = s.as_bytes().get(lt + 1 + name.len()).copied();
+        let delimited = matches!(after, Some(b'>' | b' ' | b'\t' | b'\n' | b'\r' | b'/'));
+        if delimited && is_propstat_name(name) {
+            return Some((lt, name));
         }
     }
     None
 }
 
+/// Start of the last `</name>` close tag of each propstat name in `s`.
+fn last_propstat_closes(s: &str) -> std::collections::HashMap<&str, usize> {
+    let mut last = std::collections::HashMap::new();
+    for (i, _) in s.match_indices("</") {
+        let name = xml_name(&s[i + 2..]);
+        if is_propstat_name(name) && close_tag_len(&s[i..], name).is_some() {
+            last.insert(name, i);
+        }
+    }
+    last
+}
+
+/// Length of the close tag `</name>` that `s` starts with, allowing whitespace
+/// before the `>`.
+fn close_tag_len(s: &str, name: &str) -> Option<usize> {
+    let after = s.strip_prefix("</")?.strip_prefix(name)?;
+    let spaces = after.len() - after.trim_start_matches([' ', '\t', '\n', '\r']).len();
+    after[spaces..]
+        .starts_with('>')
+        .then_some(2 + name.len() + spaces + 1)
+}
+
 /// Length of the open tag `s` starts with, up to and including its `>`, skipping
-/// any `>` inside a quoted attribute value.
+/// any `>` inside a quoted attribute value. XML allows no `<` in a tag, even
+/// quoted, so the search stops at the next one.
 fn open_tag_len(s: &str) -> Option<usize> {
     let mut quote = None;
     for (i, b) in s.bytes().enumerate() {
         match (quote, b) {
+            (_, b'<') if i > 0 => return None,
             (None, b'"' | b'\'') => quote = Some(b),
             (Some(q), _) if b == q => quote = None,
             (None, b'>') => return Some(i + 1),
@@ -840,18 +868,12 @@ fn open_tag_len(s: &str) -> Option<usize> {
 /// returning where it starts and its length.
 fn find_element_close(s: &str, name: &str) -> Option<(usize, usize)> {
     let open = format!("</{name}");
-    for (i, _) in s.match_indices(&open) {
-        let after = &s[i + open.len()..];
-        let spaces = after.len() - after.trim_start_matches([' ', '\t', '\n', '\r']).len();
-        if after[spaces..].starts_with('>') {
-            return Some((i, open.len() + spaces + 1));
-        }
-    }
-    None
+    s.match_indices(&open)
+        .find_map(|(i, _)| Some((i, close_tag_len(&s[i..], name)?)))
 }
 
-/// Whether `p` is a namespace prefix as `extract_tag` and `strip_propstat_blocks`
-/// both read one: 1 to 10 letters, digits or underscores.
+/// Whether `p` is a namespace prefix as `extract_tag` reads one: 1 to 10
+/// letters, digits or underscores. `strip_propstat_blocks` accepts more.
 fn is_xml_prefix(p: &str) -> bool {
     !p.is_empty() && p.chars().count() <= 10 && p.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
@@ -1874,10 +1896,30 @@ END:VCALENDAR</cal:calendar-data>
     }
 
     #[test]
-    fn propfind_prefixes_are_read_the_same_way_for_strip_and_status() {
+    fn propfind_strips_propstat_under_prefixes_extract_tag_does_not_read() {
+        // A propstat under a prefix `extract_tag` rejects, holding a status
+        // under one it reads (legal when both are bound to DAV:).
+        let inner = "<d:prop><d:getetag/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status>";
+        for prefix in ["my-ns", "abcdefghijk"] {
+            let xml = format!(
+                "<{prefix}:response><{prefix}:href>/x</{prefix}:href>\
+<{prefix}:propstat>{inner}</{prefix}:propstat></{prefix}:response>"
+            );
+            assert_eq!(propfind_resource_exists(&xml), Some(true), "{prefix}");
+        }
+        // Something that looks like an open tag but never ends (an apostrophe
+        // in a comment) does not stop the real propstat from being stripped.
+        let xml = format!(
+            "<d:response><d:href>/x.ics</d:href><!-- <propstat isn't -->\
+<d:propstat>{inner}</d:propstat></d:response>"
+        );
+        assert_eq!(propfind_resource_exists(&xml), Some(true));
+    }
+
+    #[test]
+    fn propfind_status_under_a_prefix_extract_tag_does_not_read_is_unknown() {
         // `extract_tag` does not read a `my-ns:` status, so a resource-level
-        // 404 under it is unknown rather than gone, and its propstat is not
-        // taken as proof of presence either.
+        // 404 under it is unknown rather than gone.
         let xml = "<my-ns:response><my-ns:href>/x.ics</my-ns:href>\
 <my-ns:status>HTTP/1.1 404 Not Found</my-ns:status></my-ns:response>";
         assert_eq!(propfind_resource_exists(xml), None);
