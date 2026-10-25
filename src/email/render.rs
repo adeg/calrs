@@ -4,7 +4,9 @@ use super::*;
 
 // --- HTML email template helpers ---
 
-pub(super) fn h(s: &str) -> String {
+/// Escape text for HTML element content. Also used by the few web handlers
+/// that answer with a bare `Html` string instead of a template.
+pub(crate) fn h(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
