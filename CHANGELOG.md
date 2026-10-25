@@ -173,6 +173,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 | Every timezone in every picker | 1.20.0 | All IANA zones grouped by region, with the common ones first, and a slot-page note when the clocks change before the day shown (#265) |
 | Attendees follow the booking | 1.20.0 | Additional attendees get updates when a reschedule is confirmed and cancellations when a booking ends; invites carry a SEQUENCE and fold long lines (#267) |
 
+## [1.20.6] - 2026-10-25
+
+Security patch release: a crafted link to the Google Calendar connection page could run script in the browser of a logged-in user. Upgrading is recommended for every instance. No migrations, no configuration change.
+
+### Security
+
+- **Reflected XSS in the Google Calendar OAuth callback** (#299) - The callback page echoed the provider's `error` parameter into the page without escaping it, and it is read before the OAuth state is checked, so anyone could put markup in a link to `/dashboard/sources/google/callback`. A logged-in user who followed such a link ran the attacker's script with their session, which against an admin could act in the admin panel. The parameter is now escaped, and so are the two other messages that page echoes from Google's responses. Found while reviewing #260.
+
 ## [1.20.5] - 2026-10-25
 
 Patch release for iCloud users: every booking written to an iCloud calendar was reported as a failed write-back, rewritten eight times and alerted to the host, although the event was on the calendar from the start. No migrations, no configuration change.
