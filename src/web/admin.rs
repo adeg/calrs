@@ -2296,7 +2296,7 @@ fn admin_upload_refused(reason: &str) -> Response {
 
 pub(super) async fn admin_upload_logo(
     State(state): State<Arc<AppState>>,
-    _admin: crate::auth::AdminUser,
+    admin: crate::auth::AdminUser,
     headers: HeaderMap,
     Query(csrf_query): Query<CsrfQuery>,
     mut multipart: Multipart,
@@ -2309,10 +2309,6 @@ pub(super) async fn admin_upload_logo(
     while let Ok(Some(field)) = multipart.next_field().await {
         if field.name() != Some("logo") {
             continue;
-        }
-        let content_type = field.content_type().unwrap_or("").to_string();
-        if !content_type.starts_with("image/") {
-            return admin_upload_refused("logo");
         }
         let Ok(bytes) = field.bytes().await else {
             return admin_upload_refused("logo");
@@ -2327,7 +2323,7 @@ pub(super) async fn admin_upload_logo(
             tracing::error!(error = %e, "failed to save the logo");
             return admin_upload_refused("logo-save");
         }
-        tracing::info!(admin = %_admin.user.email, "admin: logo uploaded");
+        tracing::info!(admin = %admin.user.email, "admin: logo uploaded");
         return Redirect::to("/dashboard/admin").into_response();
     }
     admin_upload_refused("logo")
@@ -2349,7 +2345,7 @@ pub(super) async fn admin_delete_logo(
 
 pub(super) async fn admin_upload_favicon(
     State(state): State<Arc<AppState>>,
-    _admin: crate::auth::AdminUser,
+    admin: crate::auth::AdminUser,
     headers: HeaderMap,
     Query(csrf_query): Query<CsrfQuery>,
     mut multipart: Multipart,
@@ -2373,7 +2369,7 @@ pub(super) async fn admin_upload_favicon(
             tracing::error!(error = %e, "failed to save the favicon");
             return admin_upload_refused("favicon-save");
         }
-        tracing::info!(admin = %_admin.user.email, "admin: favicon uploaded");
+        tracing::info!(admin = %admin.user.email, "admin: favicon uploaded");
         return Redirect::to("/dashboard/admin").into_response();
     }
     admin_upload_refused("favicon")

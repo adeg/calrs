@@ -551,33 +551,30 @@ pub(super) async fn get_custom_colors(
 // --- Logo management ---
 
 pub(super) async fn serve_logo(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let logo_path = state.data_dir.join("logo.png");
-    match tokio::fs::read(&logo_path).await {
-        Ok(bytes) => {
-            let content_type = if logo_path.exists() {
-                // Detect from magic bytes
-                if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-                    "image/png"
-                } else if bytes.starts_with(&[0xFF, 0xD8]) {
-                    "image/jpeg"
-                } else if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
-                    "image/svg+xml"
-                } else {
-                    "image/png"
-                }
-            } else {
-                "image/png"
-            };
-            axum::response::Response::builder()
-                .status(200)
-                .header("Content-Type", content_type)
-                .header("Cache-Control", "public, max-age=3600")
-                .body(axum::body::Body::from(bytes))
-                .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()))
-                .into_response()
+    let Ok(bytes) = tokio::fs::read(state.data_dir.join("logo.png")).await else {
+        return (axum::http::StatusCode::NOT_FOUND, "").into_response();
+    };
+    let mut response = axum::response::Response::builder()
+        .status(200)
+        .header("Cache-Control", "public, max-age=3600");
+    response = match detect_image_ext(&bytes) {
+        Some("jpg") => response.header("Content-Type", "image/jpeg"),
+        Some(ext) => response.header("Content-Type", format!("image/{ext}")),
+        // Uploads have refused SVG since #97, but an instance set up before
+        // then can still hold one. Keep serving it, sandboxed so that opening
+        // `/logo` directly cannot run a script inside it.
+        None if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") => {
+            response.header("Content-Type", "image/svg+xml").header(
+                "Content-Security-Policy",
+                "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+            )
         }
-        Err(_) => (axum::http::StatusCode::NOT_FOUND, "").into_response(),
-    }
+        None => response.header("Content-Type", "image/png"),
+    };
+    response
+        .body(axum::body::Body::from(bytes))
+        .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()))
+        .into_response()
 }
 
 // --- Favicon management ---

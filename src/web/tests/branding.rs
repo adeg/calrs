@@ -425,7 +425,7 @@ async fn an_svg_logo_is_refused_with_a_message() {
             .unwrap(),
     )
     .await;
-    assert!(page.contains("The logo was not saved."), "message shown");
+    assert!(page.contains(">The logo was not saved."), "message shown");
     assert!(!page.contains("SVG"), "the help no longer recommends SVG");
 }
 
@@ -460,8 +460,8 @@ async fn a_logo_up_to_the_advertised_2_mb_is_saved() {
     assert_eq!(location(&response), "/dashboard/admin?upload_error=logo");
 }
 
-/// Over Axum's default body limit, the multipart reader itself fails; that
-/// must still say why rather than redirect with nothing.
+/// Over the route's body limit, the multipart reader itself fails; that must
+/// still say why rather than redirect with nothing.
 #[tokio::test]
 async fn a_logo_over_the_body_limit_is_refused_with_a_message() {
     let (app, data_dir, session) = admin_with_data_dir().await;
@@ -478,6 +478,60 @@ async fn a_logo_over_the_body_limit_is_refused_with_a_message() {
         .unwrap();
     assert_eq!(location(&response), "/dashboard/admin?upload_error=logo");
     assert!(!data_dir.join("logo.png").exists());
+}
+
+/// A body cut off before its closing boundary fails in the reader, not in the
+/// size or format checks (the image itself is valid), so only the handling
+/// of a read error can refuse it.
+#[tokio::test]
+async fn a_truncated_upload_is_refused_with_a_message() {
+    let (app, data_dir, session) = admin_with_data_dir().await;
+    for (uri, field, file) in [
+        ("/dashboard/admin/logo", "logo", "logo.png"),
+        ("/dashboard/admin/favicon", "favicon", FAVICON_FILE),
+    ] {
+        let request = upload(uri, &session, field, "image/png", &png_of(1024));
+        let (parts, body) = request.into_parts();
+        let bytes = body.collect().await.unwrap().to_bytes();
+        let cut = bytes.len() - "\r\n--calrs-test-boundary--\r\n".len();
+        let request = axum::http::Request::from_parts(parts, Body::from(bytes.slice(..cut)));
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            location(&response),
+            format!("/dashboard/admin?upload_error={field}")
+        );
+        assert!(!data_dir.join(file).exists(), "{field}");
+    }
+}
+
+#[tokio::test]
+async fn the_logo_is_served_with_its_real_type() {
+    let (app, data_dir) = router_with_data_dir().await;
+    for (bytes, content_type) in [
+        (b"GIF89a....".to_vec(), "image/gif"),
+        (b"RIFF\0\0\0\0WEBPVP8 ".to_vec(), "image/webp"),
+        (vec![0xFF, 0xD8, 0xFF, 0xE0], "image/jpeg"),
+        (png_of(16), "image/png"),
+    ] {
+        std::fs::write(data_dir.join("logo.png"), &bytes).unwrap();
+        let response = app.clone().oneshot(get("/logo")).await.unwrap();
+        assert_eq!(response.headers()["content-type"], content_type);
+    }
+}
+
+/// An SVG logo stored before uploads refused SVG keeps displaying, but cannot
+/// run its script when `/logo` is opened directly.
+#[tokio::test]
+async fn a_legacy_svg_logo_is_served_sandboxed() {
+    let (app, data_dir) = router_with_data_dir().await;
+    std::fs::write(data_dir.join("logo.png"), b"<svg onload=\"alert(1)\"/>").unwrap();
+    let response = app.oneshot(get("/logo")).await.unwrap();
+    assert_eq!(response.headers()["content-type"], "image/svg+xml");
+    let csp = response.headers()["content-security-policy"]
+        .to_str()
+        .unwrap();
+    assert!(csp.contains("sandbox"), "{csp}");
+    assert!(csp.contains("default-src 'none'"), "{csp}");
 }
 
 #[tokio::test]
@@ -509,7 +563,7 @@ async fn favicon_uploads_say_why_they_are_refused() {
             .unwrap(),
     )
     .await;
-    assert!(page.contains("The favicon was not saved."));
+    assert!(page.contains(">The favicon was not saved."));
 
     let png = png_of(FAVICON_MAX_BYTES);
     let response = app
@@ -540,6 +594,9 @@ async fn an_unknown_upload_error_shows_no_message() {
     )
     .await;
     assert!(!page.contains("forged"));
-    assert!(!page.contains("was not saved"));
-    assert!(!page.contains("could not be written"));
+    // The messages also sit in the file inputs' `data-too-big`, for the
+    // browser-side check; only a paragraph of their own is shown.
+    assert!(!page.contains(">The logo was not saved."));
+    assert!(!page.contains(">The favicon was not saved."));
+    assert!(!page.contains(">The file could not be written"));
 }

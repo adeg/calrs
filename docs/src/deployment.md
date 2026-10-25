@@ -121,6 +121,9 @@ server {
     ssl_certificate /etc/letsencrypt/live/cal.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/cal.example.com/privkey.pem;
 
+    # Room for the 2 MB logo and avatar uploads (nginx's default is 1 MB).
+    client_max_body_size 3m;
+
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host $host;
