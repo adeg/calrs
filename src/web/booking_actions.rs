@@ -2135,6 +2135,10 @@ pub(super) async fn guest_reschedule_booking(
                 .bind(&booking_id)
                 .execute(&state.pool)
                 .await;
+        } else {
+            // The host's copy was never written, but a claimant's may have
+            // been (#269): nothing after a decline or expiry would find it.
+            claimant_delete_booking(&state.pool, &state.secret_key, &uid).await;
         }
         // Release any resource reservation while the reschedule awaits approval.
         resource_delete_booking(&state.pool, &state.secret_key, &uid).await;
@@ -2873,6 +2877,27 @@ pub(super) async fn claim_booking(
                 lang => lang,
             })
             .unwrap_or_else(|e| internal_error_body("template render", &e)),
+        )
+        .into_response();
+    }
+
+    // Only a confirmed booking can be claimed. A claim link stays valid for
+    // days, so the booking may have been cancelled since, or be awaiting the
+    // approval of a reschedule (the link works again once it is approved).
+    let confirmed: bool =
+        sqlx::query_scalar("SELECT status = 'confirmed' FROM bookings WHERE id = ?")
+            .bind(&booking_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .unwrap_or(None)
+            .unwrap_or(false);
+    if !confirmed {
+        let _ = tx.rollback().await;
+        return render_booking_action_error_keys_in(
+            &state,
+            lang,
+            "bae-title-invalid-or-expired",
+            "bae-body-claim-invalid",
         )
         .into_response();
     }

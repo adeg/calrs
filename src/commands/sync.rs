@@ -1933,6 +1933,68 @@ mod tests {
         assert_eq!(status, "cancelled");
     }
 
+    /// #269: the host's event is already gone when an orphan is cancelled,
+    /// but a claimant's copy is not. Its cached row going away shows the
+    /// claimant's calendar was cleaned up too. Called directly: the CalDAV
+    /// sweep's global uid lookup would see that cached copy and not count
+    /// the booking as an orphan in the first place, while the EWS sweep
+    /// asks per event.
+    #[tokio::test]
+    async fn orphan_sweep_deletes_the_claimants_copy() {
+        let pool = setup_test_db().await;
+        let (source_id, et_id) = seed_fixtures(&pool).await;
+        let key = [0u8; 32];
+
+        let claimant = Uuid::new_v4().to_string();
+        let claimant_account = Uuid::new_v4().to_string();
+        let claimant_source = Uuid::new_v4().to_string();
+        let claimant_cal = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users (id, email, name, role, auth_provider, username, enabled) VALUES (?, 'watcher@example.com', 'Watcher', 'user', 'local', 'watcher', 1)")
+            .bind(&claimant).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO accounts (id, name, email, timezone, user_id) VALUES (?, 'Watcher', 'watcher@example.com', 'UTC', ?)")
+            .bind(&claimant_account).bind(&claimant).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO caldav_sources (id, account_id, name, url, username, write_calendar_href) VALUES (?, ?, 'w', 'http://127.0.0.1:9/', 'w', '/w/')")
+            .bind(&claimant_source).bind(&claimant_account).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO calendars (id, source_id, href, display_name, is_busy) VALUES (?, ?, '/w/', 'W', 1)")
+            .bind(&claimant_cal).bind(&claimant_source).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO events (id, calendar_id, uid, summary, start_at, end_at) VALUES (?, ?, 'deleted-uid', 'Intro', '20300615T100000Z', '20300615T103000Z')")
+            .bind(Uuid::new_v4().to_string()).bind(&claimant_cal).execute(&pool).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO bookings (id, event_type_id, uid, guest_name, guest_email, guest_timezone,
+                start_at, end_at, status, cancel_token, reschedule_token, caldav_calendar_href,
+                claimed_by_user_id)
+             VALUES (?, ?, 'deleted-uid', 'Guest', 'guest@example.com', 'UTC',
+                '2030-06-15T10:00:00', '2030-06-15T10:30:00', 'confirmed', 'ctok', 'rtok',
+                '/calendars/host/default/', ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&et_id)
+        .bind(&claimant)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let outcome = cancel_orphaned_booking(
+            &pool,
+            &key,
+            OrphanCheck::Caldav(None),
+            &source_id,
+            "deleted-uid",
+        )
+        .await;
+        assert!(matches!(outcome, OrphanOutcome::Cancelled));
+
+        let copies: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events WHERE uid = 'deleted-uid' AND calendar_id = ?",
+        )
+        .bind(&claimant_cal)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(copies, 0);
+    }
+
     /// Issue #106 (cross-source isolation defense-in-depth): a sync of source A
     /// must NEVER cancel a booking that belongs to source B's account, even if
     /// the UIDs collide. UUIDs make natural collisions vanishingly unlikely, but

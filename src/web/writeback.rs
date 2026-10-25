@@ -123,17 +123,27 @@ async fn push_claimant_copy(
     details: &crate::email::BookingDetails,
     targets: &[String],
 ) {
-    let claimant: Option<String> =
-        sqlx::query_scalar("SELECT claimed_by_user_id FROM bookings WHERE uid = ?")
-            .bind(booking_uid)
-            .fetch_optional(pool)
-            .await
-            .unwrap_or(None)
-            .flatten();
     // A claimant who is also a host already has the host's copy.
-    let Some(claimant) = claimant.filter(|c| !targets.contains(c)) else {
+    let Some(claimant) = super::booking_claimant(pool, booking_uid)
+        .await
+        .filter(|c| !targets.contains(c))
+    else {
         return;
     };
+    // So does one writing to the same collection as a host (a shared team
+    // calendar): a second PUT of the uid would replace the host's event,
+    // phone included, with the claimant's copy.
+    let mut host_collections = Vec::new();
+    for target in targets {
+        host_collections.extend(super::write_collections(pool, target).await);
+    }
+    let shared = super::write_collections(pool, &claimant)
+        .await
+        .iter()
+        .any(|c| host_collections.contains(c));
+    if shared {
+        return;
+    }
     let details = crate::email::BookingDetails {
         guest_phone: None,
         ..details.clone()
@@ -144,6 +154,16 @@ async fn push_claimant_copy(
             .await
     {
         tracing::warn!(uid = %booking_uid, claimant = %claimant, error = %msg, "claimant calendar copy not written");
+    }
+    // The booking may have ended while the copy was being written, after
+    // its cancellation looked for the copy: do not leave it behind.
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bookings WHERE uid = ?")
+        .bind(booking_uid)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+    if status.as_deref() != Some("confirmed") {
+        super::claimant_delete_booking(pool, key, booking_uid).await;
     }
 }
 

@@ -444,18 +444,49 @@ async fn caldav_delete_for_user(
     .await;
 }
 
-/// Delete the copy of a booking a watcher's claim put on the claimant's own
-/// calendar (#269), by uid from their write sources. A no-op for a booking
-/// nobody claimed.
-pub(crate) async fn claimant_delete_booking(pool: &SqlitePool, key: &[u8; 32], booking_uid: &str) {
-    let claimant: Option<String> =
+/// The user who claimed a booking, when their copy of it is calrs's to
+/// write and delete (#269): not when they own its Google Meet event, the
+/// only copy of the meeting on their calendar.
+pub(super) async fn booking_claimant(pool: &SqlitePool, booking_uid: &str) -> Option<String> {
+    let claimant: String =
         sqlx::query_scalar("SELECT claimed_by_user_id FROM bookings WHERE uid = ?")
             .bind(booking_uid)
             .fetch_optional(pool)
             .await
             .unwrap_or(None)
-            .flatten();
-    if let Some(claimant) = claimant {
+            .flatten()?;
+    if crate::google_meet::holds_the_meet(pool, booking_uid, &claimant).await {
+        return None;
+    }
+    Some(claimant)
+}
+
+/// A server origin (scheme, host, port) and a collection on it.
+type Collection = (Option<(String, String, Option<u16>)>, String);
+
+/// The collections a user writes bookings to.
+pub(super) async fn write_collections(pool: &SqlitePool, user_id: &str) -> Vec<Collection> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT cs.url, cs.write_calendar_href FROM caldav_sources cs
+         JOIN accounts a ON a.id = cs.account_id
+         WHERE a.user_id = ? AND cs.enabled = 1 AND cs.write_calendar_href IS NOT NULL",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    rows.into_iter()
+        .map(|(url, href)| (crate::resources::url_origin(&url), href))
+        .collect()
+}
+
+/// Delete the copy of a booking a watcher's claim put on the claimant's own
+/// calendar (#269), by uid from their current write sources, like the
+/// host's delete when its stored href no longer matches one. A copy left in
+/// a calendar the claimant has since stopped writing to stays there, as the
+/// host's would. A no-op for a booking nobody claimed.
+pub(crate) async fn claimant_delete_booking(pool: &SqlitePool, key: &[u8; 32], booking_uid: &str) {
+    if let Some(claimant) = booking_claimant(pool, booking_uid).await {
         caldav_delete_for_user(pool, key, &claimant, booking_uid).await;
     }
 }

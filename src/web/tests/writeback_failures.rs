@@ -739,27 +739,53 @@ async fn sources_dashboard_shows_the_sync_error() {
     );
 }
 
-/// A booking with a phone number claimed by a watcher, both with a write
-/// calendar on their own server (#269). The claimant's write calendar has
-/// its own href, so a copy recorded in the host's place would show. Returns
-/// (pool, host id, booking id, uid, host server, claimant server).
-async fn claimed_fixture(
+/// How [`claimed_fixture_with`] sets a claim up.
+struct ClaimSetup {
+    /// The host has a write calendar.
     host_writes: bool,
-) -> (
-    SqlitePool,
-    String,
-    String,
-    String,
-    Arc<MockDav>,
-    Arc<MockDav>,
-) {
+    /// How the claimant's server answers writes.
+    claimant_mode: DavMode,
+    /// The claimant writes to the host's own collection (a shared calendar).
+    shared_collection: bool,
+    /// The booking's status when the claim is posted.
+    status: &'static str,
+}
+
+impl Default for ClaimSetup {
+    fn default() -> Self {
+        ClaimSetup {
+            host_writes: true,
+            claimant_mode: DavMode::Ok,
+            shared_collection: false,
+            status: "confirmed",
+        }
+    }
+}
+
+/// What [`claimed_fixture_with`] returns.
+struct Claimed {
+    app: Router,
+    pool: SqlitePool,
+    host: String,
+    id: String,
+    uid: String,
+    host_dav: Arc<MockDav>,
+    claimant_dav: Arc<MockDav>,
+    claim_body: String,
+}
+
+/// A booking with a phone number claimed by a watcher, each with a write
+/// calendar on their own server unless `shared_collection` (#269). The
+/// claimant's write calendar has its own href, so a copy recorded in the
+/// host's place would show.
+async fn claimed_fixture_with(setup: ClaimSetup) -> Claimed {
     let (app, pool, _, et_id) = setup_test_app().await;
     let host: String = sqlx::query_scalar("SELECT id FROM users WHERE email = 'test@example.com'")
         .fetch_one(&pool)
         .await
         .unwrap();
     let (host_base, host_dav) = spawn_mock_dav(DavMode::Ok).await;
-    if host_writes {
+    if setup.host_writes {
         seed_write_source(&pool, &host, &host_base).await;
     }
     sqlx::query("UPDATE event_types SET sms_phone_mode = 'optional' WHERE id = ?")
@@ -773,7 +799,7 @@ async fn claimed_fixture(
         "guest@test.com",
         Utc::now() + Duration::days(10),
         30,
-        "confirmed",
+        setup.status,
         &[("guest_phone", Some("+33612345678".to_string()))],
     )
     .await;
@@ -786,13 +812,22 @@ async fn claimed_fixture(
     .execute(&pool)
     .await
     .unwrap();
-    let (claimant_base, claimant_dav) = spawn_mock_dav(DavMode::Ok).await;
+    let (claimant_dav, claimant_base) = if setup.shared_collection {
+        (host_dav.clone(), host_base)
+    } else {
+        let (base, dav) = spawn_mock_dav(setup.claimant_mode).await;
+        (dav, base)
+    };
     let source = seed_write_source(&pool, &watcher, &claimant_base).await;
-    sqlx::query("UPDATE caldav_sources SET write_calendar_href = '/dav/claimant/' WHERE id = ?")
+    if !setup.shared_collection {
+        sqlx::query(
+            "UPDATE caldav_sources SET write_calendar_href = '/dav/claimant/' WHERE id = ?",
+        )
         .bind(&source)
         .execute(&pool)
         .await
         .unwrap();
+    }
     sqlx::query(
         "INSERT INTO booking_claim_tokens (id, booking_id, user_id, token, expires_at) \
          VALUES ('bct-269', ?, ?, 'claim-tok-269', datetime('now', '+7 days'))",
@@ -804,6 +839,7 @@ async fn claimed_fixture(
     .unwrap();
     let csrf = "test-csrf-269-claim";
     let response = app
+        .clone()
         .oneshot(post_form_unauthed(
             &format!("/booking/claim/{id}"),
             csrf,
@@ -812,8 +848,39 @@ async fn claimed_fixture(
         .await
         .unwrap();
     assert!(response.status().is_success(), "{}", response.status());
+    let claim_body = body_string(response).await;
     let uid = format!("uid-{id}");
-    (pool, host, id, uid, host_dav, claimant_dav)
+    Claimed {
+        app,
+        pool,
+        host,
+        id,
+        uid,
+        host_dav,
+        claimant_dav,
+        claim_body,
+    }
+}
+
+/// [`claimed_fixture_with`] for a confirmed booking, the host writing to a
+/// calendar of their own or not. Returns (pool, host id, booking id, uid,
+/// host server, claimant server).
+async fn claimed_fixture(
+    host_writes: bool,
+) -> (
+    SqlitePool,
+    String,
+    String,
+    String,
+    Arc<MockDav>,
+    Arc<MockDav>,
+) {
+    let c = claimed_fixture_with(ClaimSetup {
+        host_writes,
+        ..Default::default()
+    })
+    .await;
+    (c.pool, c.host, c.id, c.uid, c.host_dav, c.claimant_dav)
 }
 
 /// #269: the claim writes the claimant's copy, without the guest's phone,
@@ -871,4 +938,98 @@ async fn a_rescheduled_claimed_booking_moves_the_claimants_copy() {
     let copy = claimant_dav.only_event();
     assert!(copy.contains(&stamp), "{copy}");
     assert!(!copy.contains("+33612345678"), "{copy}");
+}
+
+/// A pending guest reschedule deletes the claimant's copy even when the host
+/// has no write calendar, so a decline or expiry leaves nothing behind.
+#[tokio::test]
+async fn a_pending_reschedule_deletes_the_claimants_copy_without_a_host_calendar() {
+    let c = claimed_fixture_with(ClaimSetup {
+        host_writes: false,
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(c.claimant_dav.stored(), 1);
+    sqlx::query(
+        "UPDATE event_types SET requires_confirmation = 1 \
+         WHERE id = (SELECT event_type_id FROM bookings WHERE id = ?)",
+    )
+    .bind(&c.id)
+    .execute(&c.pool)
+    .await
+    .unwrap();
+    let token: String = sqlx::query_scalar("SELECT reschedule_token FROM bookings WHERE id = ?")
+        .bind(&c.id)
+        .fetch_one(&c.pool)
+        .await
+        .unwrap();
+    let new_date = (Local::now().naive_local().date() + Duration::days(12))
+        .format("%Y-%m-%d")
+        .to_string();
+    let csrf = "csrf-269-resched";
+    let response = c
+        .app
+        .oneshot(post_form_unauthed(
+            &format!("/booking/reschedule/{token}"),
+            csrf,
+            &format!("_csrf={csrf}&date={new_date}&time=10%3A00&tz=UTC"),
+        ))
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{}", response.status());
+    let (_, _, _, _, status) = writeback_state(&c.pool, &c.id).await;
+    assert_eq!(status, "pending");
+    assert_eq!(c.claimant_dav.stored(), 0);
+}
+
+/// A claimant whose copy cannot be written leaves the host's write-back
+/// bookkeeping alone: the retries and the alert are about the host.
+#[tokio::test]
+async fn a_failed_claimant_copy_is_not_recorded_as_a_host_failure() {
+    let c = claimed_fixture_with(ClaimSetup {
+        claimant_mode: DavMode::Reject,
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(c.claimant_dav.puts(), 1);
+    assert_eq!(c.claimant_dav.stored(), 0);
+    let (error, attempts, next, href, _) = writeback_state(&c.pool, &c.id).await;
+    assert_eq!(error, None);
+    assert_eq!(attempts, 0);
+    assert_eq!(next, None);
+    assert_eq!(href.as_deref(), Some("/dav/cal/"));
+}
+
+/// A claimant writing to the host's own collection gets no second PUT, which
+/// would replace the host's event with the copy that leaves the phone out.
+#[tokio::test]
+async fn a_claimant_sharing_the_hosts_calendar_does_not_overwrite_it() {
+    let c = claimed_fixture_with(ClaimSetup {
+        shared_collection: true,
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(c.host_dav.puts(), 1);
+    assert!(c.host_dav.only_event().contains("+33612345678"));
+}
+
+/// A claim link outlives the booking it was sent for: a cancelled booking
+/// can no longer be claimed, and nothing is written for it.
+#[tokio::test]
+async fn a_cancelled_booking_cannot_be_claimed() {
+    let c = claimed_fixture_with(ClaimSetup {
+        status: "cancelled",
+        ..Default::default()
+    })
+    .await;
+    assert!(c.claim_body.contains("no longer valid"), "{}", c.claim_body);
+    let claimed: Option<String> =
+        sqlx::query_scalar("SELECT claimed_by_user_id FROM bookings WHERE id = ?")
+            .bind(&c.id)
+            .fetch_one(&c.pool)
+            .await
+            .unwrap();
+    assert_eq!(claimed, None);
+    assert_eq!(c.claimant_dav.puts(), 0);
+    assert_eq!(c.host_dav.puts(), 0);
 }
