@@ -173,6 +173,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 | Every timezone in every picker | 1.20.0 | All IANA zones grouped by region, with the common ones first, and a slot-page note when the clocks change before the day shown (#265) |
 | Attendees follow the booking | 1.20.0 | Additional attendees get updates when a reschedule is confirmed and cancellations when a booking ends; invites carry a SEQUENCE and fold long lines (#267) |
 
+## [1.20.5] - 2026-10-25
+
+Patch release for iCloud users: every booking written to an iCloud calendar was reported as a failed write-back, rewritten eight times and alerted to the host, although the event was on the calendar from the start. No migrations, no configuration change.
+
+Thanks to @fucx, who found and fixed it on a real iCloud calendar, and for the German wording below.
+
+### Fixed
+
+- **Every write-back to iCloud was reported as failed** (#293) - Since 1.20.0, calrs checks that each event it writes to a calendar is really there. iCloud answers that check (`HEAD`) with `400 Bad Request` even for an event it has just stored, so every booking on an iCloud write calendar was recorded as a failed write-back: calrs wrote it again eight times over about 16 hours and emailed the host after the third attempt. calrs now asks again with `PROPFIND`, as it already did for servers that refuse `HEAD` with 405 or 501. That answer is now read properly too: the server's overall `207` only says it replied, and the event's own status inside it says whether the event is there. This also lets the deleted-event check work on iCloud. Reported and fixed by @fucx.
+- **A response written with an unusual XML prefix could read a missing property as a deleted event** (#296) - When reading a server's answer, calrs set aside property-level statuses so they would not be taken for the event's own, but only for the usual `d:`, `D:` or unprefixed forms. With any other prefix, a server that did not return an event's ETag could make the event look deleted: a false write-back failure, or a booking cancelled by the deleted-event check. Found while reviewing #293.
+
+### Changed
+
+- **German: "Powered by" now reads "Läuft mit"** (#294) - The footer of public pages said "Angetrieben von calrs", a word-for-word translation of the engine metaphor. It now reads "Läuft mit calrs", as German sites usually put it. By @fucx.
+
 ## [1.20.4] - 2026-10-25
 
 Patch release for Exchange (EWS) users: the sync could cancel confirmed bookings without telling anyone, and a busy Exchange calendar could lose its later events. Also, deleting a past meeting from any calendar no longer emails a cancellation. No migrations, no configuration change.
