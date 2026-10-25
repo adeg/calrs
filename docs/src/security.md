@@ -45,7 +45,7 @@ All POST forms are protected against cross-site request forgery using the **doub
 - On submission, the server verifies that the cookie value matches the form field
 - Mismatches return a `403 Forbidden` response
 
-This protects all 31 POST endpoints including booking submissions, settings changes, admin actions, and authentication forms. Multipart forms (avatar/logo upload) pass the token via query parameter.
+This protects all 31 POST endpoints including booking submissions, settings changes, admin actions, and authentication forms. Multipart forms (avatar/logo/favicon upload) pass the token via query parameter.
 
 The cookie uses `SameSite=Lax` and is intentionally NOT `HttpOnly` so the client-side script can read it.
 

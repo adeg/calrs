@@ -1249,17 +1249,22 @@ pub(super) async fn google_connect(
     let client_id = match creds.and_then(|(id, _)| id).filter(|s| !s.is_empty()) {
         Some(id) => id,
         None => {
-            return Html("Google Calendar integration is not configured. Ask your administrator to set up Google OAuth2 credentials in the admin panel.".to_string()).into_response();
+            return Html(crate::i18n::translate(
+                auth_user.lang,
+                "google-error-not-configured",
+                None,
+            ))
+            .into_response();
         }
     };
 
     let base_url = crate::settings::base_url().unwrap_or_default();
     if base_url.is_empty() {
-        return Html(
-            "The public base URL is not configured. Set it via the CALRS_BASE_URL environment \
-             variable or in the admin panel under System settings before using OAuth2 flows."
-                .to_string(),
-        )
+        return Html(crate::i18n::translate(
+            auth_user.lang,
+            "google-error-no-base-url",
+            None,
+        ))
         .into_response();
     }
 
@@ -1308,8 +1313,13 @@ pub(super) async fn google_callback(
     // Check for errors from Google
     if let Some(error) = &query.error {
         // `error` comes from the query string: anyone can put markup in it.
-        let error = crate::email::h(error);
-        return Html(format!("Google authorization failed: {}", error)).into_response();
+        return Html(tr1(
+            auth_user.lang,
+            "google-error-authorization",
+            "error",
+            &crate::email::h(error),
+        ))
+        .into_response();
     }
 
     // Verify CSRF state
@@ -1405,8 +1415,13 @@ pub(super) async fn google_callback(
         {
             Ok(t) => t,
             Err(e) => {
-                let e = crate::email::h(&e.to_string());
-                return Html(format!("Token exchange failed: {}", e)).into_response();
+                return Html(tr1(
+                    auth_user.lang,
+                    "google-error-token-exchange",
+                    "error",
+                    &crate::email::h(&e.to_string()),
+                ))
+                .into_response()
             }
         };
 
@@ -1415,8 +1430,13 @@ pub(super) async fn google_callback(
     let google_email = match crate::oauth2_caldav::fetch_google_email(&access_token).await {
         Ok(e) => e,
         Err(e) => {
-            let e = crate::email::h(&e.to_string());
-            return Html(format!("Failed to fetch Google account email: {}", e)).into_response();
+            return Html(tr1(
+                auth_user.lang,
+                "google-error-account-email",
+                "error",
+                &crate::email::h(&e.to_string()),
+            ))
+            .into_response();
         }
     };
     let caldav_url = crate::oauth2_caldav::google_caldav_url_for_email(&google_email);
