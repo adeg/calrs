@@ -22,7 +22,7 @@
   {% endif %}
   <div style="display: flex; gap: 0.75rem; align-items: flex-start; flex-wrap: wrap;">
     <form method="post" action="/dashboard/admin/logo" enctype="multipart/form-data" style="margin: 0; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
-      <input type="file" name="logo" accept="image/*" required style="font-size: 0.85rem;">
+      <input type="file" name="logo" accept="image/png,image/jpeg,image/gif,image/webp" data-max-bytes="{{ logo_max_bytes }}" data-too-big="{{ t('admin-logo-refused') }}" required style="font-size: 0.85rem;">
       <button type="submit" class="slot-btn" style="cursor: pointer; font-weight: 600; color: var(--accent); border-color: var(--accent);">{{ t("settings-upload") }}</button>
     </form>
     {% if has_logo %}
@@ -31,6 +31,11 @@
     </form>
     {% endif %}
   </div>
+  {% if upload_error == "logo" %}
+  <p style="color: var(--error-text); font-size: 0.875rem; margin-top: 0.75rem;">{{ t("admin-logo-refused") }}</p>
+  {% elif upload_error == "logo-save" %}
+  <p style="color: var(--error-text); font-size: 0.875rem; margin-top: 0.75rem;">{{ t("admin-upload-save-failed") }}</p>
+  {% endif %}
   <div style="margin-top: 1rem;">
     <form method="post" action="/dashboard/admin/company-link" style="margin: 0; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
       <label for="company_link" style="font-size: 0.875rem; font-weight: 500; white-space: nowrap;">{{ t("admin-company-link") }}</label>
@@ -39,6 +44,29 @@
     </form>
     <span style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-top: 0.25rem;">{{ t("admin-company-link-help") }}</span>
   </div>
+</div>
+
+<!-- Favicon -->
+<div class="card">
+  <h2>{{ t("admin-favicon") }}</h2>
+  <p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 1rem;">{{ t("admin-favicon-help") }}</p>
+  <div style="display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
+    <img src="/favicon" alt="{{ t('admin-favicon') }}" width="32" height="32" style="object-fit: contain;">
+    <form method="post" action="/dashboard/admin/favicon" enctype="multipart/form-data" style="margin: 0; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+      <input type="file" name="favicon" accept="image/png,image/jpeg,image/gif,image/webp" data-max-bytes="{{ favicon_max_bytes }}" data-too-big="{{ t('admin-favicon-refused') }}" required style="font-size: 0.85rem;">
+      <button type="submit" class="slot-btn" style="cursor: pointer; font-weight: 600; color: var(--accent); border-color: var(--accent);">{{ t("settings-upload") }}</button>
+    </form>
+    {% if has_favicon %}
+    <form method="post" action="/dashboard/admin/favicon/delete" style="margin: 0;">
+      <button type="submit" class="slot-btn" style="cursor: pointer; font-size: 0.85rem; color: var(--error-text); border-color: var(--error-text);">{{ t("settings-remove") }}</button>
+    </form>
+    {% endif %}
+  </div>
+  {% if upload_error == "favicon" %}
+  <p style="color: var(--error-text); font-size: 0.875rem; margin-top: 0.75rem;">{{ t("admin-favicon-refused") }}</p>
+  {% elif upload_error == "favicon-save" %}
+  <p style="color: var(--error-text); font-size: 0.875rem; margin-top: 0.75rem;">{{ t("admin-upload-save-failed") }}</p>
+  {% endif %}
 </div>
 
 <!-- Theme -->
@@ -126,6 +154,16 @@
   </form>
 </div>
 <script>
+// Refuse an oversized logo or favicon before uploading it: past the limit the
+// server stops reading, and browsers often show a reset connection rather
+// than the redirect that explains why.
+document.querySelectorAll('input[type=file][data-max-bytes]').forEach(function(input) {
+  input.addEventListener('change', function() {
+    var file = input.files[0];
+    input.setCustomValidity(file && file.size > Number(input.dataset.maxBytes) ? input.dataset.tooBig : '');
+    input.reportValidity();
+  });
+});
 function themeChanged(val) {
   document.getElementById('custom-colors').style.display = val === 'custom' ? 'block' : 'none';
   document.querySelectorAll('.theme-card').forEach(function(c) {
