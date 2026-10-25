@@ -46,13 +46,13 @@ use availability::*;
 use booking::*;
 use booking_actions::*;
 use branding::*;
-pub(crate) use calendar_push::caldav_delete_booking;
 pub(crate) use calendar_push::resource_delete_booking;
 use calendar_push::*;
 pub(crate) use calendar_push::{
     booking_additional_attendees, booking_attendee_languages, booking_guest_input,
     booking_ics_sequence, with_invite_holders,
 };
+pub(crate) use calendar_push::{caldav_delete_booking, claimant_delete_booking};
 use dashboard::*;
 use event_types::*;
 use format::*;

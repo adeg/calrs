@@ -2135,6 +2135,10 @@ pub(super) async fn guest_reschedule_booking(
                 .bind(&booking_id)
                 .execute(&state.pool)
                 .await;
+        } else {
+            // The host's copy was never written, but a claimant's may have
+            // been (#269): nothing after a decline or expiry would find it.
+            claimant_delete_booking(&state.pool, &state.secret_key, &uid).await;
         }
         // Release any resource reservation while the reschedule awaits approval.
         resource_delete_booking(&state.pool, &state.secret_key, &uid).await;
@@ -2838,7 +2842,8 @@ pub(super) async fn claim_booking(
         }
     };
 
-    // Use BEGIN IMMEDIATE to prevent race conditions
+    // The guarded UPDATE below is what settles races; the transaction keeps
+    // the claim and the token's use together.
     let mut tx = match sqlx::pool::Pool::begin(&state.pool).await {
         Ok(tx) => tx,
         Err(e) => return internal_error_response("database query", &e),
@@ -2877,14 +2882,31 @@ pub(super) async fn claim_booking(
         .into_response();
     }
 
-    // Claim the booking
-    let _ = sqlx::query(
-        "UPDATE bookings SET claimed_by_user_id = ?, claimed_at = datetime('now') WHERE id = ?",
+    // Claim the booking. Only a confirmed one: a claim link stays valid for
+    // days, so the booking may have been cancelled since, or be awaiting the
+    // approval of a reschedule (the link works again once it is approved).
+    // The guarded UPDATE decides, so a cancellation or another claim that
+    // commits after the reads above still wins.
+    let claimed = sqlx::query(
+        "UPDATE bookings SET claimed_by_user_id = ?, claimed_at = datetime('now') \
+         WHERE id = ? AND status = 'confirmed' AND claimed_by_user_id IS NULL",
     )
     .bind(&claimant_user_id)
     .bind(&booking_id)
     .execute(&mut *tx)
-    .await;
+    .await
+    .map(|r| r.rows_affected() == 1)
+    .unwrap_or(false);
+    if !claimed {
+        let _ = tx.rollback().await;
+        return render_booking_action_error_keys_in(
+            &state,
+            lang,
+            "bae-title-invalid-or-expired",
+            "bae-body-claim-invalid",
+        )
+        .into_response();
+    }
 
     // Mark this token as used
     let _ =
@@ -3017,30 +3039,14 @@ pub(super) async fn claim_booking(
         details.additional_attendees.push(claimant_email.clone());
     }
 
-    // Re-push updated ICS to host's CalDAV (with claimant as ATTENDEE)
+    // Re-push updated ICS to host's CalDAV (with claimant as ATTENDEE). The
+    // booking is claimed by now, so this writes the claimant's own copy too.
     caldav_push_booking(
         &state.pool,
         &state.secret_key,
         &host_user_id,
         &uid,
         &details,
-    )
-    .await;
-
-    // Push to claimant's CalDAV calendar too. Deliberately bypasses the
-    // assigned-user resolution: this copy belongs to the claimant even
-    // though the booking stays assigned elsewhere. The claimant is a
-    // watcher, not a host: they see the notes on their dashboard but never
-    // the guest phone, so their copy leaves it out.
-    caldav_push_booking_for_user(
-        &state.pool,
-        &state.secret_key,
-        &claimant_user_id,
-        &uid,
-        &crate::email::BookingDetails {
-            guest_phone: None,
-            ..details.clone()
-        },
     )
     .await;
 
