@@ -22,7 +22,7 @@
   {% endif %}
   <div style="display: flex; gap: 0.75rem; align-items: flex-start; flex-wrap: wrap;">
     <form method="post" action="/dashboard/admin/logo" enctype="multipart/form-data" style="margin: 0; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
-      <input type="file" name="logo" accept="image/*" required style="font-size: 0.85rem;">
+      <input type="file" name="logo" accept="image/png,image/jpeg,image/gif,image/webp" required style="font-size: 0.85rem;">
       <button type="submit" class="slot-btn" style="cursor: pointer; font-weight: 600; color: var(--accent); border-color: var(--accent);">{{ t("settings-upload") }}</button>
     </form>
     {% if has_logo %}
@@ -31,6 +31,11 @@
     </form>
     {% endif %}
   </div>
+  {% if upload_error == "logo" %}
+  <p style="color: var(--error-text); font-size: 0.875rem; margin-top: 0.75rem;">{{ t("admin-logo-refused") }}</p>
+  {% elif upload_error == "logo-save" %}
+  <p style="color: var(--error-text); font-size: 0.875rem; margin-top: 0.75rem;">{{ t("admin-upload-save-failed") }}</p>
+  {% endif %}
   <div style="margin-top: 1rem;">
     <form method="post" action="/dashboard/admin/company-link" style="margin: 0; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
       <label for="company_link" style="font-size: 0.875rem; font-weight: 500; white-space: nowrap;">{{ t("admin-company-link") }}</label>
@@ -57,6 +62,11 @@
     </form>
     {% endif %}
   </div>
+  {% if upload_error == "favicon" %}
+  <p style="color: var(--error-text); font-size: 0.875rem; margin-top: 0.75rem;">{{ t("admin-favicon-refused") }}</p>
+  {% elif upload_error == "favicon-save" %}
+  <p style="color: var(--error-text); font-size: 0.875rem; margin-top: 0.75rem;">{{ t("admin-upload-save-failed") }}</p>
+  {% endif %}
 </div>
 
 <!-- Theme -->

@@ -586,6 +586,12 @@ pub(super) async fn serve_logo(State(state): State<Arc<AppState>>) -> impl IntoR
 /// name is fixed whatever the format; `serve_favicon` sniffs the bytes.
 pub(super) const FAVICON_FILE: &str = "favicon.png";
 
+/// Largest logo the admin panel accepts, as its help text says.
+pub(super) const LOGO_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// Largest favicon the admin panel accepts, as its help text says.
+pub(super) const FAVICON_MAX_BYTES: usize = 512 * 1024;
+
 /// The built-in favicon, served when no custom one is uploaded. It is the crab
 /// `base.html` used to inline as a data URI.
 const DEFAULT_FAVICON_SVG: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦀</text></svg>";
