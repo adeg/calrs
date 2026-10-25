@@ -1099,9 +1099,9 @@ enum OrphanCheck<'a> {
 /// What [`cancel_orphaned_booking`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OrphanOutcome {
-    /// No confirmed booking of this source's host has this UID (or another
-    /// path changed it first): nothing to do.
-    NotOurs,
+    /// Nothing to do: no confirmed booking of this source's host has this
+    /// UID, the meeting is already over, or another path changed it first.
+    NoAction,
     /// The booking was cancelled.
     Cancelled,
     /// The server says the booking's event is still there.
@@ -1156,7 +1156,7 @@ async fn cancel_orphaned_booking(
 
     let booking = match booking {
         Some(b) => b,
-        None => return OrphanOutcome::NotOurs, // No confirmed booking of ours with this UID
+        None => return OrphanOutcome::NoAction, // No confirmed booking of ours with this UID
     };
 
     let (
@@ -1175,6 +1175,16 @@ async fn cancel_orphaned_booking(
         host_language,
     ) = booking;
     let host_language = crate::email::supported_language(host_language);
+
+    // A meeting that is already over is left alone: a host clearing past
+    // events from their calendar must not send the guest a cancellation.
+    // Legacy rows (no UTC timestamp) keep the former behaviour.
+    let ended = crate::booking_time::ics_times(&start_at, &end_at)
+        .and_then(|(_, end)| chrono::NaiveDateTime::parse_from_str(&end, "%Y%m%dT%H%M%SZ").ok())
+        .is_some_and(|end| end <= Utc::now().naive_utc());
+    if ended {
+        return OrphanOutcome::NoAction;
+    }
 
     // Confirm-before-cancel: if we can check and have a stored calendar href
     // for this booking, verify that the event is really gone on the server
@@ -1227,7 +1237,7 @@ async fn cancel_orphaned_booking(
 
     let cancelled = matches!(updated, Ok(r) if r.rows_affected() > 0);
     if !cancelled {
-        return OrphanOutcome::NotOurs;
+        return OrphanOutcome::NoAction;
     }
 
     tracing::info!(
@@ -1573,6 +1583,27 @@ mod tests {
             assert_eq!(removed, u32::from(gone), "{exists:?}");
             assert_eq!(cached, i64::from(!gone), "{exists:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn orphan_sweep_does_not_cancel_a_meeting_that_is_over() {
+        let pool = setup_test_db().await;
+        let key = [0u8; 32];
+        let (source_id, cal_id, booking_id) = seed_vanished_ews_booking(&pool, "past-uid").await;
+        sqlx::query("UPDATE bookings SET time_version = 1, start_at = '2020-06-15T10:00:00Z', end_at = '2020-06-15T10:30:00Z' WHERE id = ?")
+            .bind(&booking_id).execute(&pool).await.unwrap();
+        let removed = remove_orphaned_ews_events(
+            &pool,
+            &key,
+            &ExistsProvider(Some(false)),
+            &source_id,
+            &cal_id,
+            &other_event_snapshot(),
+            "",
+        )
+        .await;
+        assert_eq!(booking_status(&pool, &booking_id).await, "confirmed");
+        assert_eq!(removed, 1, "the cached copy of a past meeting is dropped");
     }
 
     #[tokio::test]

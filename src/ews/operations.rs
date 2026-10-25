@@ -237,7 +237,16 @@ async fn list_items_window(
 "#,
             folder = escape(folder_id),
         );
-        let resp = post_soap(endpoint, username, password, &body, true).await?;
+        let resp = match post_soap(endpoint, username, password, &body, true).await {
+            // A server whose find limit is below what was asked may refuse a
+            // busy window outright instead of cutting it short: that window
+            // is incomplete, and smaller ones may still be read.
+            Err(e) if start_utc.is_some() && is_find_limit_fault(&e.to_string()) => {
+                tracing::debug!(error = %e, "EWS refused a CalendarView over its find limit");
+                return Ok((Vec::new(), false));
+            }
+            other => other?,
+        };
         let mut page = parse_calendar_items_response(&resp)?;
 
         let included = page.included_count;
@@ -265,6 +274,16 @@ async fn list_items_window(
     }
     tracing::debug!(folder = %folder_id, count = all.len(), "EWS FindItem complete");
     Ok((all, true))
+}
+
+/// A refusal meaning "this window holds more items than the server will
+/// return in one answer".
+fn is_find_limit_fault(message: &str) -> bool {
+    message
+        .strip_prefix(super::soap::SOAP_FAULT_PREFIX)
+        .is_some_and(|fault| {
+            fault.split(':').next().unwrap_or("").trim() == "ErrorExceededFindCountLimit"
+        })
 }
 
 /// Whether a CalendarView answer holds every item of its window. The
@@ -1018,5 +1037,17 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(found, ["TARGET"]);
+    }
+
+    #[test]
+    fn find_limit_refusal_is_recognised() {
+        let prefix = super::super::soap::SOAP_FAULT_PREFIX;
+        assert!(is_find_limit_fault(&format!(
+            "{prefix}ErrorExceededFindCountLimit: The number of items exceeded the limit."
+        )));
+        assert!(!is_find_limit_fault(&format!(
+            "{prefix}ErrorAccessDenied: no"
+        )));
+        assert!(!is_find_limit_fault("EWS request returned 500 for x"));
     }
 }
