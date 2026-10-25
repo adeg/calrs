@@ -269,7 +269,7 @@ async fn google_meet_skip_branch_still_records_caldav_href() {
         host_timezone: "UTC".to_string(),
         ..Default::default()
     };
-    caldav_push_booking_for_user(&pool, &[0u8; 32], &alice, &uid, &details).await;
+    caldav_push_booking_for_user(&pool, &[0u8; 32], &alice, &uid, &details, CopyOwner::Host).await;
     let stored: Option<String> =
         sqlx::query_scalar("SELECT caldav_calendar_href FROM bookings WHERE uid = ?")
             .bind(&uid)

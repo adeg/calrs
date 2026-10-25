@@ -3017,30 +3017,14 @@ pub(super) async fn claim_booking(
         details.additional_attendees.push(claimant_email.clone());
     }
 
-    // Re-push updated ICS to host's CalDAV (with claimant as ATTENDEE)
+    // Re-push updated ICS to host's CalDAV (with claimant as ATTENDEE). The
+    // booking is claimed by now, so this writes the claimant's own copy too.
     caldav_push_booking(
         &state.pool,
         &state.secret_key,
         &host_user_id,
         &uid,
         &details,
-    )
-    .await;
-
-    // Push to claimant's CalDAV calendar too. Deliberately bypasses the
-    // assigned-user resolution: this copy belongs to the claimant even
-    // though the booking stays assigned elsewhere. The claimant is a
-    // watcher, not a host: they see the notes on their dashboard but never
-    // the guest phone, so their copy leaves it out.
-    caldav_push_booking_for_user(
-        &state.pool,
-        &state.secret_key,
-        &claimant_user_id,
-        &uid,
-        &crate::email::BookingDetails {
-            guest_phone: None,
-            ..details.clone()
-        },
     )
     .await;
 

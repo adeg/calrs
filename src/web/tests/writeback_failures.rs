@@ -738,3 +738,137 @@ async fn sources_dashboard_shows_the_sync_error() {
         "{body}"
     );
 }
+
+/// A booking with a phone number claimed by a watcher, both with a write
+/// calendar on their own server (#269). The claimant's write calendar has
+/// its own href, so a copy recorded in the host's place would show. Returns
+/// (pool, host id, booking id, uid, host server, claimant server).
+async fn claimed_fixture(
+    host_writes: bool,
+) -> (
+    SqlitePool,
+    String,
+    String,
+    String,
+    Arc<MockDav>,
+    Arc<MockDav>,
+) {
+    let (app, pool, _, et_id) = setup_test_app().await;
+    let host: String = sqlx::query_scalar("SELECT id FROM users WHERE email = 'test@example.com'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (host_base, host_dav) = spawn_mock_dav(DavMode::Ok).await;
+    if host_writes {
+        seed_write_source(&pool, &host, &host_base).await;
+    }
+    sqlx::query("UPDATE event_types SET sms_phone_mode = 'optional' WHERE id = ?")
+        .bind(&et_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let id = insert_v1_booking(
+        &pool,
+        &et_id,
+        "guest@test.com",
+        Utc::now() + Duration::days(10),
+        30,
+        "confirmed",
+        &[("guest_phone", Some("+33612345678".to_string()))],
+    )
+    .await;
+    let watcher = insert_role_user(&pool, "watcher@test.com", "user").await;
+    sqlx::query(
+        "INSERT INTO accounts (id, name, email, timezone, user_id) \
+         VALUES ('acc-watcher-269', 'Watcher', 'watcher@test.com', 'UTC', ?)",
+    )
+    .bind(&watcher)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (claimant_base, claimant_dav) = spawn_mock_dav(DavMode::Ok).await;
+    let source = seed_write_source(&pool, &watcher, &claimant_base).await;
+    sqlx::query("UPDATE caldav_sources SET write_calendar_href = '/dav/claimant/' WHERE id = ?")
+        .bind(&source)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO booking_claim_tokens (id, booking_id, user_id, token, expires_at) \
+         VALUES ('bct-269', ?, ?, 'claim-tok-269', datetime('now', '+7 days'))",
+    )
+    .bind(&id)
+    .bind(&watcher)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let csrf = "test-csrf-269-claim";
+    let response = app
+        .oneshot(post_form_unauthed(
+            &format!("/booking/claim/{id}"),
+            csrf,
+            &format!("_csrf={csrf}&token=claim-tok-269"),
+        ))
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{}", response.status());
+    let uid = format!("uid-{id}");
+    (pool, host, id, uid, host_dav, claimant_dav)
+}
+
+/// #269: the claim writes the claimant's copy, without the guest's phone,
+/// and leaves the host's href alone so the host's delete still finds it.
+#[tokio::test]
+async fn a_claim_writes_the_claimants_copy_and_keeps_the_hosts_href() {
+    let (pool, _, id, _, host_dav, claimant_dav) = claimed_fixture(true).await;
+    assert!(host_dav.only_event().contains("+33612345678"));
+    let copy = claimant_dav.only_event();
+    assert!(copy.contains("mailto:watcher@test.com"), "{copy}");
+    assert!(!copy.contains("+33612345678"), "{copy}");
+    let (_, _, _, href, _) = writeback_state(&pool, &id).await;
+    assert_eq!(href.as_deref(), Some("/dav/cal/"));
+}
+
+/// Cancelling a claimed booking removes the claimant's copy with the host's.
+#[tokio::test]
+async fn cancelling_a_claimed_booking_deletes_the_claimants_copy() {
+    let (pool, host, _, uid, host_dav, claimant_dav) = claimed_fixture(true).await;
+    caldav_delete_booking(&pool, &[0u8; 32], &host, &uid).await;
+    assert_eq!(host_dav.stored(), 0);
+    assert_eq!(claimant_dav.stored(), 0);
+}
+
+/// The host may have no write calendar at all: the claimant's copy is still
+/// deleted, although the booking records no href of its own.
+#[tokio::test]
+async fn the_claimants_copy_is_deleted_when_the_host_has_no_write_calendar() {
+    let (pool, host, id, uid, _, claimant_dav) = claimed_fixture(false).await;
+    assert_eq!(claimant_dav.stored(), 1);
+    let (_, _, _, href, _) = writeback_state(&pool, &id).await;
+    assert_eq!(href, None);
+    caldav_delete_booking(&pool, &[0u8; 32], &host, &uid).await;
+    assert_eq!(claimant_dav.stored(), 0);
+}
+
+/// A reschedule deletes the booking from the calendars and pushes it at its
+/// new time: the claimant's copy moves with the host's.
+#[tokio::test]
+async fn a_rescheduled_claimed_booking_moves_the_claimants_copy() {
+    let (pool, host, id, uid, host_dav, claimant_dav) = claimed_fixture(true).await;
+    caldav_delete_booking(&pool, &[0u8; 32], &host, &uid).await;
+    assert_eq!(claimant_dav.stored(), 0);
+    let start = Utc::now() + Duration::days(12);
+    sqlx::query("UPDATE bookings SET start_at = ?, end_at = ? WHERE id = ?")
+        .bind(utc_stamp(start))
+        .bind(utc_stamp(start + Duration::minutes(30)))
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    push_fresh(&pool, &host, &uid).await;
+    let stamp = format!("DTSTART:{}", start.format("%Y%m%dT%H%M%SZ"));
+    assert!(host_dav.only_event().contains(&stamp));
+    let copy = claimant_dav.only_event();
+    assert!(copy.contains(&stamp), "{copy}");
+    assert!(!copy.contains("+33612345678"), "{copy}");
+}

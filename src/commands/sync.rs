@@ -1245,6 +1245,8 @@ async fn cancel_orphaned_booking(
         booking_id = %booking_id,
         "booking cancelled: calendar event deleted externally"
     );
+    // The host's event is already gone; a claimant's copy is not (#269).
+    crate::web::claimant_delete_booking(pool, key, &booking_uid).await;
 
     // Send cancellation emails
     let smtp_config = match crate::email::load_smtp_config(pool, key).await {
