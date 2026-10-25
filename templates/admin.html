@@ -41,6 +41,24 @@
   </div>
 </div>
 
+<!-- Favicon -->
+<div class="card">
+  <h2>{{ t("admin-favicon") }}</h2>
+  <p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 1rem;">{{ t("admin-favicon-help") }}</p>
+  <div style="display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
+    <img src="/favicon" alt="{{ t('admin-favicon') }}" width="32" height="32" style="object-fit: contain;">
+    <form method="post" action="/dashboard/admin/favicon" enctype="multipart/form-data" style="margin: 0; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+      <input type="file" name="favicon" accept="image/png,image/jpeg,image/gif,image/webp" required style="font-size: 0.85rem;">
+      <button type="submit" class="slot-btn" style="cursor: pointer; font-weight: 600; color: var(--accent); border-color: var(--accent);">{{ t("settings-upload") }}</button>
+    </form>
+    {% if has_favicon %}
+    <form method="post" action="/dashboard/admin/favicon/delete" style="margin: 0;">
+      <button type="submit" class="slot-btn" style="cursor: pointer; font-size: 0.85rem; color: var(--error-text); border-color: var(--error-text);">{{ t("settings-remove") }}</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+
 <!-- Theme -->
 <div class="card">
   <h2>{{ t("admin-theme") }}</h2>

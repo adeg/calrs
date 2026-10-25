@@ -490,6 +490,7 @@ fn is_embeddable_path(path: &str) -> bool {
         "avatar",
         "team-avatar",
         "logo",
+        "favicon",
         "accent.css",
         "brand-logo",
         "embed.js",
@@ -788,6 +789,11 @@ pub async fn create_router(pool: SqlitePool, data_dir: PathBuf, secret_key: [u8;
         )
         .route("/dashboard/admin/logo", post(admin_upload_logo))
         .route("/dashboard/admin/logo/delete", post(admin_delete_logo))
+        .route("/dashboard/admin/favicon", post(admin_upload_favicon))
+        .route(
+            "/dashboard/admin/favicon/delete",
+            post(admin_delete_favicon),
+        )
         .route(
             "/dashboard/admin/company-link",
             post(admin_update_company_link),
@@ -832,6 +838,10 @@ pub async fn create_router(pool: SqlitePool, data_dir: PathBuf, secret_key: [u8;
         )
         // Serve logo and fonts
         .route("/logo", get(serve_logo))
+        // `/favicon.ico` too: browsers request it on their own for pages
+        // without a <link rel="icon">, such as a raw image or a JSON error.
+        .route("/favicon", get(serve_favicon))
+        .route("/favicon.ico", get(serve_favicon))
         .route("/accent.css", get(serve_accent_css))
         .route("/brand-logo", get(serve_brand_logo))
         .route("/embed.js", get(serve_embed_js))

@@ -580,6 +580,41 @@ pub(super) async fn serve_logo(State(state): State<Arc<AppState>>) -> impl IntoR
     }
 }
 
+// --- Favicon management ---
+
+/// File the admin-uploaded favicon is stored under, next to `logo.png`. The
+/// name is fixed whatever the format; `serve_favicon` sniffs the bytes.
+pub(super) const FAVICON_FILE: &str = "favicon.png";
+
+/// The built-in favicon, served when no custom one is uploaded. It is the crab
+/// `base.html` used to inline as a data URI.
+const DEFAULT_FAVICON_SVG: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦀</text></svg>";
+
+pub(super) async fn serve_favicon(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let custom = tokio::fs::read(state.data_dir.join(FAVICON_FILE))
+        .await
+        .ok()
+        .and_then(|bytes| {
+            let content_type = match detect_image_ext(&bytes)? {
+                "png" => "image/png",
+                "jpg" => "image/jpeg",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                _ => return None,
+            };
+            Some((content_type, bytes))
+        });
+    let (content_type, body) =
+        custom.unwrap_or(("image/svg+xml", DEFAULT_FAVICON_SVG.as_bytes().to_vec()));
+    axum::response::Response::builder()
+        .status(200)
+        .header("Content-Type", content_type)
+        .header("Cache-Control", "public, max-age=3600")
+        .body(axum::body::Body::from(body))
+        .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()))
+        .into_response()
+}
+
 pub(super) async fn serve_accent_css(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let css = state.theme_css.read().await.clone();
     axum::response::Response::builder()
