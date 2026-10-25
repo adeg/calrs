@@ -1307,6 +1307,8 @@ pub(super) async fn google_callback(
 ) -> impl IntoResponse {
     // Check for errors from Google
     if let Some(error) = &query.error {
+        // `error` comes from the query string: anyone can put markup in it.
+        let error = crate::email::h(error);
         return Html(format!("Google authorization failed: {}", error)).into_response();
     }
 
@@ -1402,7 +1404,10 @@ pub(super) async fn google_callback(
         .await
         {
             Ok(t) => t,
-            Err(e) => return Html(format!("Token exchange failed: {}", e)).into_response(),
+            Err(e) => {
+                let e = crate::email::h(&e.to_string());
+                return Html(format!("Token exchange failed: {}", e)).into_response();
+            }
         };
 
     // Identify the Google account that authorized us; its email is what goes in the CalDAV URL.
@@ -1410,6 +1415,7 @@ pub(super) async fn google_callback(
     let google_email = match crate::oauth2_caldav::fetch_google_email(&access_token).await {
         Ok(e) => e,
         Err(e) => {
+            let e = crate::email::h(&e.to_string());
             return Html(format!("Failed to fetch Google account email: {}", e)).into_response();
         }
     };
