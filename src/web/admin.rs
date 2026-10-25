@@ -540,6 +540,7 @@ pub(super) async fn admin_dashboard(
             meeting_webhook_has_secret => meeting_webhook_has_secret,
             meeting_webhook_display_name => meeting_webhook_display_name,
             has_logo => state.data_dir.join("logo.png").exists(),
+            has_favicon => state.data_dir.join(FAVICON_FILE).exists(),
             company_link => get_company_link(&state.pool).await.unwrap_or_default(),
             current_theme => get_theme_name(&state.pool).await,
             custom_colors => {
@@ -2177,6 +2178,50 @@ pub(super) async fn admin_delete_logo(
     }
     let logo_path = state.data_dir.join("logo.png");
     let _ = tokio::fs::remove_file(&logo_path).await;
+    Redirect::to("/dashboard/admin").into_response()
+}
+
+pub(super) async fn admin_upload_favicon(
+    State(state): State<Arc<AppState>>,
+    _admin: crate::auth::AdminUser,
+    headers: HeaderMap,
+    Query(csrf_query): Query<CsrfQuery>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    if let Err(resp) = verify_csrf_token(&headers, &csrf_query._csrf) {
+        return resp;
+    }
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name() == Some("favicon") {
+            if let Ok(bytes) = field.bytes().await {
+                if bytes.len() > 512 * 1024 {
+                    return Redirect::to("/dashboard/admin").into_response();
+                }
+                // Same rule as the logo: trust magic bytes, not the multipart
+                // Content-Type. SVG is not accepted, so an upload served from
+                // this origin can never carry script.
+                if detect_image_ext(&bytes).is_none() {
+                    return Redirect::to("/dashboard/admin").into_response();
+                }
+                let _ = tokio::fs::write(state.data_dir.join(FAVICON_FILE), &bytes).await;
+                tracing::info!(admin = %_admin.user.email, "admin: favicon uploaded");
+            }
+        }
+    }
+    Redirect::to("/dashboard/admin").into_response()
+}
+
+pub(super) async fn admin_delete_favicon(
+    State(state): State<Arc<AppState>>,
+    _admin: crate::auth::AdminUser,
+    headers: HeaderMap,
+    Form(csrf): Form<CsrfForm>,
+) -> impl IntoResponse {
+    if let Err(resp) = verify_csrf_token(&headers, &csrf._csrf) {
+        return resp;
+    }
+    let _ = tokio::fs::remove_file(state.data_dir.join(FAVICON_FILE)).await;
+    tracing::info!(admin = %_admin.user.email, "admin: favicon removed");
     Redirect::to("/dashboard/admin").into_response()
 }
 

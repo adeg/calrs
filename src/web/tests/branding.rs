@@ -277,6 +277,62 @@ async fn accent_css_returns_200() {
     assert_eq!(response.status(), 200);
 }
 
+/// A router whose data directory a test can put files into.
+async fn router_with_data_dir() -> (Router, std::path::PathBuf) {
+    let pool = setup_test_db().await;
+    let data_dir = std::env::temp_dir().join(format!("calrs_test_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let router = create_router(pool, data_dir.clone(), [0u8; 32]).await;
+    (router, data_dir)
+}
+
+#[tokio::test]
+async fn favicon_defaults_to_the_crab() {
+    let (app, _) = router_with_data_dir().await;
+    for uri in ["/favicon", "/favicon.ico"] {
+        let response = app.clone().oneshot(get(uri)).await.unwrap();
+        assert_eq!(response.status().as_u16(), 200, "{uri}");
+        assert_eq!(response.headers()["content-type"], "image/svg+xml", "{uri}");
+        assert!(body_string(response).await.contains("🦀"), "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn uploaded_favicon_is_served_with_its_sniffed_type() {
+    let (app, data_dir) = router_with_data_dir().await;
+    let png = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x01];
+    std::fs::write(data_dir.join(FAVICON_FILE), png).unwrap();
+
+    let response = app.oneshot(get("/favicon")).await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], &png[..]);
+}
+
+/// A stored file that is not a recognised image (left over, or written by
+/// hand) must not be served as one: the crab is served instead.
+#[tokio::test]
+async fn unrecognised_favicon_file_falls_back_to_the_crab() {
+    let (app, data_dir) = router_with_data_dir().await;
+    std::fs::write(data_dir.join(FAVICON_FILE), b"<svg onload=alert(1)>").unwrap();
+
+    let response = app.oneshot(get("/favicon")).await.unwrap();
+    assert_eq!(response.headers()["content-type"], "image/svg+xml");
+    assert!(body_string(response).await.contains("🦀"));
+}
+
+#[tokio::test]
+async fn pages_link_the_favicon_route() {
+    let (app, _, _, _) = setup_test_app().await;
+    let response = app.oneshot(get("/auth/login")).await.unwrap();
+    let html = body_string(response).await;
+    assert!(
+        html.contains(r#"<link rel="icon" href="/favicon">"#),
+        "{html}"
+    );
+}
+
 #[tokio::test]
 async fn logo_returns_response() {
     let (app, _, _, _) = setup_test_app().await;
