@@ -771,12 +771,14 @@ fn strip_propstat(s: &str) -> (String, usize) {
             rest = &rest[start + len..];
             continue;
         }
-        let close = open_len
-            .filter(|&len| last_close.get(name).is_some_and(|&c| c >= at + len))
-            .and_then(|len| {
-                let (close_start, close_len) = find_element_close(&rest[start + len..], name)?;
-                Some(start + len + close_start + close_len)
-            });
+        // An open tag that never ends (a `<` in an attribute value, invalid
+        // but seen) still has its close searched for from just past the `<`.
+        let len = open_len.unwrap_or(1);
+        let close = last_close
+            .get(name)
+            .filter(|&&c| c >= at + len)
+            .and_then(|_| find_element_close(&rest[start + len..], name))
+            .map(|(close_start, close_len)| start + len + close_start + close_len);
         match close {
             Some(end) => {
                 result.push_str(&rest[..start]);
@@ -794,10 +796,11 @@ fn strip_propstat(s: &str) -> (String, usize) {
     (result, removed)
 }
 
-/// The XML name starting at `s`: letters, digits, `_`, `-`, `.` and `:`.
+/// The XML name starting at `s`: everything up to whitespace or one of
+/// `< > / = " '`, a superset of what XML allows in a name.
 fn xml_name(s: &str) -> &str {
     let end = s
-        .find(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')))
+        .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '/' | '=' | '"' | '\''))
         .unwrap_or(s.len());
     &s[..end]
 }
@@ -816,8 +819,8 @@ fn is_propstat_name(name: &str) -> bool {
 fn find_propstat_open(s: &str) -> Option<(usize, &str)> {
     for (lt, _) in s.match_indices('<') {
         let name = xml_name(&s[lt + 1..]);
-        let after = s.as_bytes().get(lt + 1 + name.len()).copied();
-        let delimited = matches!(after, Some(b'>' | b' ' | b'\t' | b'\n' | b'\r' | b'/'));
+        let after = s[lt + 1 + name.len()..].chars().next();
+        let delimited = after.is_some_and(|c| c.is_whitespace() || matches!(c, '>' | '/'));
         if delimited && is_propstat_name(name) {
             return Some((lt, name));
         }
@@ -841,7 +844,7 @@ fn last_propstat_closes(s: &str) -> std::collections::HashMap<&str, usize> {
 /// before the `>`.
 fn close_tag_len(s: &str, name: &str) -> Option<usize> {
     let after = s.strip_prefix("</")?.strip_prefix(name)?;
-    let spaces = after.len() - after.trim_start_matches([' ', '\t', '\n', '\r']).len();
+    let spaces = after.len() - after.trim_start().len();
     after[spaces..]
         .starts_with('>')
         .then_some(2 + name.len() + spaces + 1)
@@ -1912,6 +1915,16 @@ END:VCALENDAR</cal:calendar-data>
         let xml = format!(
             "<d:response><d:href>/x.ics</d:href><!-- <propstat isn't -->\
 <d:propstat>{inner}</d:propstat></d:response>"
+        );
+        assert_eq!(propfind_resource_exists(&xml), Some(true));
+        // A `<` inside an attribute value (invalid XML) and a prefix with a
+        // combining mark still have their propstat stripped.
+        let xml = format!(
+            "<d:response><d:href>/x</d:href><d:propstat a=\"x<y\">{inner}</d:propstat></d:response>"
+        );
+        assert_eq!(propfind_resource_exists(&xml), Some(true));
+        let xml = format!(
+            "<d:response><d:href>/x</d:href><e\u{301}:propstat>{inner}</e\u{301}:propstat></d:response>"
         );
         assert_eq!(propfind_resource_exists(&xml), Some(true));
     }
