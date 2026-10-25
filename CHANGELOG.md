@@ -173,13 +173,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 | Every timezone in every picker | 1.20.0 | All IANA zones grouped by region, with the common ones first, and a slot-page note when the clocks change before the day shown (#265) |
 | Attendees follow the booking | 1.20.0 | Additional attendees get updates when a reschedule is confirmed and cancellations when a booking ends; invites carry a SEQUENCE and fold long lines (#267) |
 
-## [Unreleased]
+## [1.20.4] - 2026-10-25
+
+Patch release for Exchange (EWS) users: the sync could cancel confirmed bookings without telling anyone, and a busy Exchange calendar could lose its later events. Also, deleting a past meeting from any calendar no longer emails a cancellation. No migrations, no configuration change.
+
+Thanks to @adeg, who found the two Exchange bugs while working on native Microsoft 365 support (#290).
 
 ### Fixed
 
-- **Exchange (EWS) could cancel confirmed bookings without telling anyone** - When an event vanished from an EWS calendar between two syncs, calrs marked every confirmed booking with that UID as cancelled, straight in the database: no check with Exchange that the event was really gone, no check that the booking belonged to this calendar's host, and no email to the guest or the host, so the guest still expected the meeting. EWS now goes through the same path as CalDAV: the booking must have been written to this source's calendar for this host, Exchange must confirm the event is gone (an inconclusive lookup cancels nothing and is checked again on the next sync), and both sides get the cancellation email. Found by @adeg while working on #290.
-- **A busy Exchange calendar could lose its later events** - The EWS sync fetched two years of events in one request, which Exchange cuts off at 1000 entries without an error. A calendar past that (recurring meetings count once per occurrence) lost its latest events from the cache, so they stopped blocking slots, and any calrs booking among them was cancelled by the bug above. The sync now notices an incomplete answer and fetches the window again in smaller pieces; a window that still cannot be read in full fails the sync for that calendar and leaves its cached events in place. Found by @adeg while working on #290.
-- **Deleting a past meeting from a calendar emailed a cancellation** - When a host cleared a meeting that had already taken place from their calendar, the next sync cancelled the booking and sent the guest and the host a "cancelled" email. A booking whose end has passed is now left as it is (CalDAV and EWS).
+- **Exchange (EWS) could cancel confirmed bookings without telling anyone** (#291) - When an event vanished from an EWS calendar between two syncs, calrs marked every confirmed booking with that UID as cancelled, straight in the database: no check with Exchange that the event was really gone, no check that the booking belonged to this calendar's host, and no email to the guest or the host, so the guest still expected the meeting. EWS now goes through the same path as CalDAV: the booking must have been written to this source's calendar for this host, Exchange must confirm the event is gone (an inconclusive lookup cancels nothing and is checked again on the next sync), and both sides get the cancellation email. Found by @adeg while working on #290.
+- **A busy Exchange calendar could lose its later events** (#291) - The EWS sync fetched two years of events in one request, which Exchange cuts off at 1000 entries without an error. A calendar past that (recurring meetings count once per occurrence) lost its latest events from the cache, so they stopped blocking slots, and any calrs booking among them was cancelled by the bug above. The sync now notices an incomplete answer and fetches the window again in smaller pieces; a window that still cannot be read in full fails the sync for that calendar and leaves its cached events in place. Found by @adeg while working on #290.
+- **Deleting a past meeting from a calendar emailed a cancellation** (#291) - When a host cleared a meeting that had already taken place from their calendar, the next sync cancelled the booking and sent the guest and the host a "cancelled" email. A booking whose end has passed is now left as it is (CalDAV and EWS).
 
 ## [1.20.3] - 2026-10-24
 
