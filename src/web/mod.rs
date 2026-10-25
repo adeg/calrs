@@ -491,6 +491,7 @@ fn is_embeddable_path(path: &str) -> bool {
         "team-avatar",
         "logo",
         "favicon",
+        "favicon.ico",
         "accent.css",
         "brand-logo",
         "embed.js",
