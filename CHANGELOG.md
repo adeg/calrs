@@ -173,6 +173,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 | Every timezone in every picker | 1.20.0 | All IANA zones grouped by region, with the common ones first, and a slot-page note when the clocks change before the day shown (#265) |
 | Attendees follow the booking | 1.20.0 | Additional attendees get updates when a reschedule is confirmed and cancellations when a booking ends; invites carry a SEQUENCE and fold long lines (#267) |
 
+## [1.20.7] - 2026-10-25
+
+Bug fix release for booking watchers. No migrations, no configuration change.
+
+### Fixed
+
+- **A claimed booking's copy in the claimant's calendar now follows the booking** (#269, #302) - Claiming a booking put a copy in the claimant's own calendar, and nothing touched it again: a cancellation left it in place and a reschedule left it at the old time. The copy is now moved on every reschedule and approval, and deleted on every cancel, decline or expiry, on a reschedule awaiting approval (even when the host has no write calendar), and when a sync finds the host's event deleted. It is not written when the claimant is a host of the booking, owns its Google Meet event, or would write to a calendar a host already writes to.
+- **A claim no longer overwrites the host's calendar location** (#302) - The claimant's push recorded the claimant's calendar as the booking's write-back location, so the host's own deletes afterwards only found their event through the delete-by-UID fallback.
+- **Only a confirmed, unclaimed booking can be claimed** (#302) - A claim link used after the booking was cancelled, or racing a cancellation, could still claim it and leave a calendar copy behind. The claim is now a guarded update and shows the "no longer valid" page when it loses.
+
+Known limitation, same as on the host side: if a claimant changes their write calendar after claiming, a copy left in the old calendar stays there.
+
 ## [1.20.6] - 2026-10-25
 
 Security patch release: a crafted link to the Google Calendar connection page could run script in the browser of a logged-in user. Upgrading is recommended for every instance. No migrations, no configuration change.
