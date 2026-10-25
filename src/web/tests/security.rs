@@ -153,6 +153,8 @@ fn is_embeddable_path_allows_booking_surfaces_only() {
     assert!(!is_embeddable_path("/"));
     assert!(!is_embeddable_path("/embed.js"));
     assert!(!is_embeddable_path("/accent.css"));
+    assert!(!is_embeddable_path("/favicon"));
+    assert!(!is_embeddable_path("/favicon.ico"));
     assert!(!is_embeddable_path("/avatar/123"));
     assert!(!is_embeddable_path("/booking/approve/tok"));
 }
