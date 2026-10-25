@@ -727,7 +727,7 @@ fn parse_sync_response(xml: &str) -> SyncResult {
 ///   tell and must not act on it.
 fn propfind_resource_exists(xml: &str) -> Option<bool> {
     let block = *split_responses(xml).first()?;
-    let stripped = strip_propstat_blocks(block);
+    let (stripped, propstats) = strip_propstat(block);
     if let Some(status) = extract_tag(&stripped, "d:status") {
         if status.contains("404") || status.contains("410") {
             return Some(false);
@@ -738,22 +738,31 @@ fn propfind_resource_exists(xml: &str) -> Option<bool> {
             .is_some_and(|code| code.len() == 3 && code.starts_with('2'));
         return is_2xx.then_some(true);
     }
-    (stripped.len() < block.len()).then_some(true)
+    (propstats > 0).then_some(true)
 }
 
 /// Remove every `<propstat>…</propstat>` subtree from a WebDAV response fragment.
 ///
-/// Used by `parse_sync_response` and `propfind_resource_exists` to isolate the
-/// resource-level `<d:status>` from any property-level statuses nested inside
-/// propstat elements. Accepts any namespace prefix (`d:`, `D:`, `a:`, none),
-/// like `split_responses` and `extract_tag`: a propstat left in place would
-/// have its property 404 read as "the resource is gone". Tolerates malformed
-/// XML (leaves an unmatched open tag in place) rather than failing.
+/// Used by `parse_sync_response` to isolate the resource-level `<d:status>` from
+/// any property-level statuses nested inside propstat elements. Accepts any
+/// namespace prefix `extract_tag` accepts (`is_xml_prefix`): a propstat left in
+/// place would have its property 404 read as "the resource is gone". Tolerates
+/// malformed XML (leaves an unmatched open tag in place) rather than failing.
 fn strip_propstat_blocks(s: &str) -> String {
+    strip_propstat(s).0
+}
+
+/// `strip_propstat_blocks`, also counting the propstat elements with content
+/// that were removed (a self-closing `<propstat/>` is dropped but not counted).
+fn strip_propstat(s: &str) -> (String, usize) {
     let mut result = String::with_capacity(s.len());
     let mut rest = s;
-    while let Some((start, close_tag)) = find_propstat_open(rest) {
-        let Some(open_len) = rest[start..].find('>').map(|i| i + 1) else {
+    let mut removed = 0;
+    // Tag names with no close tag left in the input: a later open tag of the
+    // same name has none either, so it is not searched for again.
+    let mut unclosed: Vec<String> = Vec::new();
+    while let Some((start, name)) = find_propstat_open(rest) {
+        let Some(open_len) = open_tag_len(&rest[start..]) else {
             break;
         };
         if rest[start..start + open_len].ends_with("/>") {
@@ -762,21 +771,30 @@ fn strip_propstat_blocks(s: &str) -> String {
             rest = &rest[start + open_len..];
             continue;
         }
-        let Some(rel_close) = rest[start..].find(&close_tag) else {
+        let close = if unclosed.contains(&name) {
+            None
+        } else {
+            find_element_close(&rest[start + open_len..], &name)
+        };
+        let Some((close_start, close_len)) = close else {
             // Malformed, no close tag: keep this one and look for the next.
+            if !unclosed.contains(&name) {
+                unclosed.push(name);
+            }
             result.push_str(&rest[..=start]);
             rest = &rest[start + 1..];
             continue;
         };
         result.push_str(&rest[..start]);
-        rest = &rest[start + rel_close + close_tag.len()..];
+        rest = &rest[start + open_len + close_start + close_len..];
+        removed += 1;
     }
     result.push_str(rest);
-    result
+    (result, removed)
 }
 
 /// Find the first `<propstat` or `<prefix:propstat` open tag in `s`, returning
-/// where its `<` is and the matching close tag. A longer name such as
+/// where its `<` is and the tag name with its prefix. A longer name such as
 /// `<d:propstats>` does not count, and neither do close tags.
 fn find_propstat_open(s: &str) -> Option<(usize, String)> {
     let bytes = s.as_bytes();
@@ -786,16 +804,14 @@ fn find_propstat_open(s: &str) -> Option<(usize, String)> {
             continue;
         }
         match idx.checked_sub(1).map(|i| bytes[i]) {
-            Some(b'<') => return Some((idx - 1, "</propstat>".to_string())),
+            Some(b'<') => return Some((idx - 1, "propstat".to_string())),
             Some(b':') => {
+                // A prefix is at most 10 characters, so look no further back.
                 let head = &s[..idx - 1];
-                if let Some(lt) = head.rfind('<') {
-                    let prefix = &head[lt + 1..];
-                    let is_name = prefix
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
-                    if !prefix.is_empty() && is_name {
-                        return Some((lt, format!("</{prefix}:propstat>")));
+                let lt = head.char_indices().rev().take(11).find(|&(_, c)| c == '<');
+                if let Some((lt, _)) = lt {
+                    if is_xml_prefix(&head[lt + 1..]) {
+                        return Some((lt, s[lt + 1..idx + "propstat".len()].to_string()));
                     }
                 }
             }
@@ -803,6 +819,41 @@ fn find_propstat_open(s: &str) -> Option<(usize, String)> {
         }
     }
     None
+}
+
+/// Length of the open tag `s` starts with, up to and including its `>`, skipping
+/// any `>` inside a quoted attribute value.
+fn open_tag_len(s: &str) -> Option<usize> {
+    let mut quote = None;
+    for (i, b) in s.bytes().enumerate() {
+        match (quote, b) {
+            (None, b'"' | b'\'') => quote = Some(b),
+            (Some(q), _) if b == q => quote = None,
+            (None, b'>') => return Some(i + 1),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Find the close tag `</name>` in `s`, allowing whitespace before the `>`,
+/// returning where it starts and its length.
+fn find_element_close(s: &str, name: &str) -> Option<(usize, usize)> {
+    let open = format!("</{name}");
+    for (i, _) in s.match_indices(&open) {
+        let after = &s[i + open.len()..];
+        let spaces = after.len() - after.trim_start_matches([' ', '\t', '\n', '\r']).len();
+        if after[spaces..].starts_with('>') {
+            return Some((i, open.len() + spaces + 1));
+        }
+    }
+    None
+}
+
+/// Whether `p` is a namespace prefix as `extract_tag` and `strip_propstat_blocks`
+/// both read one: 1 to 10 letters, digits or underscores.
+fn is_xml_prefix(p: &str) -> bool {
+    !p.is_empty() && p.chars().count() <= 10 && p.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
 
 fn parse_event_responses(xml: &str) -> Vec<RawEvent> {
@@ -1046,10 +1097,7 @@ fn extract_tag_any_prefix(xml: &str, local_name: &str) -> Option<String> {
                 let full_tag = &xml[lt_pos + 1..abs_colon + 1 + local_name.len()];
                 // Verify the prefix is a simple XML name (letters/digits, typically 1-3 chars)
                 let prefix_part = &xml[lt_pos + 1..abs_colon];
-                if !prefix_part.is_empty()
-                    && prefix_part.len() <= 10
-                    && prefix_part.chars().all(|c| c.is_alphanumeric() || c == '_')
-                {
+                if is_xml_prefix(prefix_part) {
                     if let Some(result) = extract_tag_exact(xml, full_tag) {
                         return Some(result);
                     }
@@ -1805,6 +1853,40 @@ END:VCALENDAR</cal:calendar-data>
     }
 
     #[test]
+    fn propfind_reads_the_resource_status_in_unusual_markup() {
+        let gone_prop = "<d:prop><d:getetag/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status>";
+        // A `/>` inside an attribute value does not make the tag self-closing.
+        let xml = format!(
+            "<d:response><d:href>/x.ics</d:href><d:propstat x=\"/>\">{gone_prop}</d:propstat></d:response>"
+        );
+        assert_eq!(propfind_resource_exists(&xml), Some(true));
+        // Whitespace before the `>` of the close tag.
+        let xml = format!(
+            "<d:response><d:href>/x.ics</d:href><d:propstat>{gone_prop}</d:propstat\n></d:response>"
+        );
+        assert_eq!(propfind_resource_exists(&xml), Some(true));
+        // A non-ASCII prefix, which `extract_tag` reads too.
+        let xml = gone_prop.replace("d:", "é:");
+        let xml = format!(
+            "<é:response><é:href>/x.ics</é:href><é:propstat>{xml}</é:propstat></é:response>"
+        );
+        assert_eq!(propfind_resource_exists(&xml), Some(true));
+    }
+
+    #[test]
+    fn propfind_prefixes_are_read_the_same_way_for_strip_and_status() {
+        // `extract_tag` does not read a `my-ns:` status, so a resource-level
+        // 404 under it is unknown rather than gone, and its propstat is not
+        // taken as proof of presence either.
+        let xml = "<my-ns:response><my-ns:href>/x.ics</my-ns:href>\
+<my-ns:status>HTTP/1.1 404 Not Found</my-ns:status></my-ns:response>";
+        assert_eq!(propfind_resource_exists(xml), None);
+        assert!(!is_xml_prefix("my-ns"));
+        assert!(is_xml_prefix("é"));
+        assert!(!is_xml_prefix("abcdefghijk"));
+    }
+
+    #[test]
     fn propfind_without_a_usable_status_is_unknown() {
         assert_eq!(propfind_resource_exists(""), None);
         assert_eq!(propfind_resource_exists("<d:multistatus/>"), None);
@@ -1814,6 +1896,10 @@ END:VCALENDAR</cal:calendar-data>
         let bare =
             "<d:multistatus><d:response><d:href>/cal/x.ics</d:href></d:response></d:multistatus>";
         assert_eq!(propfind_resource_exists(bare), None);
+        // An empty `<propstat/>` carries no status and proves nothing.
+        let empty = "<d:multistatus><d:response><d:href>/cal/x.ics</d:href><d:propstat/>\
+</d:response></d:multistatus>";
+        assert_eq!(propfind_resource_exists(empty), None);
     }
 
     // --- parse_event_responses ---
