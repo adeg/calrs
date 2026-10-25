@@ -1312,11 +1312,12 @@ pub(super) async fn google_callback(
 ) -> impl IntoResponse {
     // Check for errors from Google
     if let Some(error) = &query.error {
+        // `error` comes from the query string: anyone can put markup in it.
         return Html(tr1(
             auth_user.lang,
             "google-error-authorization",
             "error",
-            error,
+            &crate::email::h(error),
         ))
         .into_response();
     }
@@ -1418,7 +1419,7 @@ pub(super) async fn google_callback(
                     auth_user.lang,
                     "google-error-token-exchange",
                     "error",
-                    &e.to_string(),
+                    &crate::email::h(&e.to_string()),
                 ))
                 .into_response()
             }
@@ -1433,7 +1434,7 @@ pub(super) async fn google_callback(
                 auth_user.lang,
                 "google-error-account-email",
                 "error",
-                &e.to_string(),
+                &crate::email::h(&e.to_string()),
             ))
             .into_response();
         }
