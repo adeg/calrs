@@ -94,7 +94,7 @@ pub(super) async fn push_and_record(
         };
         let owner = super::CopyOwner::Host;
         for msg in
-            super::caldav_push_booking_for_user(pool, key, target, booking_uid, details, owner)
+            super::caldav_push_booking_for_user(pool, key, target, booking_uid, details, owner, &[])
                 .await
         {
             failures.push((target.clone(), msg));
@@ -102,6 +102,19 @@ pub(super) async fn push_and_record(
     }
     if kind == PushKind::Fresh {
         push_claimant_copy(pool, key, booking_uid, details, &targets).await;
+        // The booking may have ended while it was being written (a claim
+        // racing a cancellation), after the cancellation looked for the
+        // events: do not leave them behind. The retry sweep does the same
+        // for its own pushes.
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM bookings WHERE uid = ?")
+                .bind(booking_uid)
+                .fetch_optional(pool)
+                .await
+                .unwrap_or(None);
+        if status.as_deref() != Some("confirmed") {
+            super::caldav_delete_booking(pool, key, user_id, booking_uid).await;
+        }
     }
     let attempts = record_outcome(pool, booking_uid, &failures, kind, Utc::now()).await;
     if kind == PushKind::Retry && attempts >= ALERT_AFTER_ATTEMPTS {
@@ -130,40 +143,30 @@ async fn push_claimant_copy(
     else {
         return;
     };
-    // So does one writing to the same collection as a host (a shared team
-    // calendar): a second PUT of the uid would replace the host's event,
+    // A collection the claimant shares with a host (a team calendar) already
+    // holds the host's event: a second PUT of the uid would replace it,
     // phone included, with the claimant's copy.
     let mut host_collections = Vec::new();
     for target in targets {
         host_collections.extend(super::write_collections(pool, target).await);
-    }
-    let shared = super::write_collections(pool, &claimant)
-        .await
-        .iter()
-        .any(|c| host_collections.contains(c));
-    if shared {
-        return;
     }
     let details = crate::email::BookingDetails {
         guest_phone: None,
         ..details.clone()
     };
     let owner = super::CopyOwner::Claimant;
-    for msg in
-        super::caldav_push_booking_for_user(pool, key, &claimant, booking_uid, &details, owner)
-            .await
+    for msg in super::caldav_push_booking_for_user(
+        pool,
+        key,
+        &claimant,
+        booking_uid,
+        &details,
+        owner,
+        &host_collections,
+    )
+    .await
     {
         tracing::warn!(uid = %booking_uid, claimant = %claimant, error = %msg, "claimant calendar copy not written");
-    }
-    // The booking may have ended while the copy was being written, after
-    // its cancellation looked for the copy: do not leave it behind.
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bookings WHERE uid = ?")
-        .bind(booking_uid)
-        .fetch_optional(pool)
-        .await
-        .unwrap_or(None);
-    if status.as_deref() != Some("confirmed") {
-        super::claimant_delete_booking(pool, key, booking_uid).await;
     }
 }
 

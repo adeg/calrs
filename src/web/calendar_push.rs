@@ -96,6 +96,7 @@ pub(super) async fn caldav_push_booking_for_user(
     booking_uid: &str,
     details: &crate::email::BookingDetails,
     owner: CopyOwner,
+    skip: &[Collection],
 ) -> Vec<String> {
     let mut failures = Vec::new();
     // Find all sources with write_calendar_href configured for this user
@@ -246,6 +247,11 @@ pub(super) async fn caldav_push_booking_for_user(
             // Later PUTs to other calendars must not overwrite this: cancel
             // keys off one href, and that has to be the Meet-holding calendar.
             preserved_meet_href = true;
+            continue;
+        }
+
+        let collection = (crate::resources::url_origin(url), calendar_href.clone());
+        if skip.contains(&collection) {
             continue;
         }
 
@@ -462,7 +468,7 @@ pub(super) async fn booking_claimant(pool: &SqlitePool, booking_uid: &str) -> Op
 }
 
 /// A server origin (scheme, host, port) and a collection on it.
-type Collection = (Option<(String, String, Option<u16>)>, String);
+pub(super) type Collection = (Option<(String, String, Option<u16>)>, String);
 
 /// The collections a user writes bookings to.
 pub(super) async fn write_collections(pool: &SqlitePool, user_id: &str) -> Vec<Collection> {

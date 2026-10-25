@@ -1033,3 +1033,39 @@ async fn a_cancelled_booking_cannot_be_claimed() {
     assert_eq!(c.claimant_dav.puts(), 0);
     assert_eq!(c.host_dav.puts(), 0);
 }
+
+/// A fresh push that lands after the booking was cancelled (a claim racing
+/// the cancellation) deletes what it just wrote, host's and claimant's.
+#[tokio::test]
+async fn a_push_finishing_after_a_cancellation_cleans_up_after_itself() {
+    let c = claimed_fixture_with(ClaimSetup::default()).await;
+    sqlx::query("UPDATE bookings SET status = 'cancelled' WHERE id = ?")
+        .bind(&c.id)
+        .execute(&c.pool)
+        .await
+        .unwrap();
+    push_fresh(&c.pool, &c.host, &c.uid).await;
+    assert_eq!(c.host_dav.stored(), 0);
+    assert_eq!(c.claimant_dav.stored(), 0);
+}
+
+/// A claimant with one collection shared with the host and one of their
+/// own still gets their copy in the one of their own.
+#[tokio::test]
+async fn only_the_shared_collection_is_skipped_for_the_claimant() {
+    let c = claimed_fixture_with(ClaimSetup {
+        shared_collection: true,
+        ..Default::default()
+    })
+    .await;
+    let watcher: String =
+        sqlx::query_scalar("SELECT id FROM users WHERE email = 'watcher@test.com'")
+            .fetch_one(&c.pool)
+            .await
+            .unwrap();
+    let (own_base, own_dav) = spawn_mock_dav(DavMode::Ok).await;
+    seed_write_source(&c.pool, &watcher, &own_base).await;
+    push_fresh(&c.pool, &c.host, &c.uid).await;
+    assert!(c.host_dav.only_event().contains("+33612345678"));
+    assert!(!own_dav.only_event().contains("+33612345678"));
+}

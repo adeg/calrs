@@ -2842,7 +2842,8 @@ pub(super) async fn claim_booking(
         }
     };
 
-    // Use BEGIN IMMEDIATE to prevent race conditions
+    // The guarded UPDATE below is what settles races; the transaction keeps
+    // the claim and the token's use together.
     let mut tx = match sqlx::pool::Pool::begin(&state.pool).await {
         Ok(tx) => tx,
         Err(e) => return internal_error_response("database query", &e),
@@ -2881,17 +2882,22 @@ pub(super) async fn claim_booking(
         .into_response();
     }
 
-    // Only a confirmed booking can be claimed. A claim link stays valid for
+    // Claim the booking. Only a confirmed one: a claim link stays valid for
     // days, so the booking may have been cancelled since, or be awaiting the
     // approval of a reschedule (the link works again once it is approved).
-    let confirmed: bool =
-        sqlx::query_scalar("SELECT status = 'confirmed' FROM bookings WHERE id = ?")
-            .bind(&booking_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .unwrap_or(None)
-            .unwrap_or(false);
-    if !confirmed {
+    // The guarded UPDATE decides, so a cancellation or another claim that
+    // commits after the reads above still wins.
+    let claimed = sqlx::query(
+        "UPDATE bookings SET claimed_by_user_id = ?, claimed_at = datetime('now') \
+         WHERE id = ? AND status = 'confirmed' AND claimed_by_user_id IS NULL",
+    )
+    .bind(&claimant_user_id)
+    .bind(&booking_id)
+    .execute(&mut *tx)
+    .await
+    .map(|r| r.rows_affected() == 1)
+    .unwrap_or(false);
+    if !claimed {
         let _ = tx.rollback().await;
         return render_booking_action_error_keys_in(
             &state,
@@ -2901,15 +2907,6 @@ pub(super) async fn claim_booking(
         )
         .into_response();
     }
-
-    // Claim the booking
-    let _ = sqlx::query(
-        "UPDATE bookings SET claimed_by_user_id = ?, claimed_at = datetime('now') WHERE id = ?",
-    )
-    .bind(&claimant_user_id)
-    .bind(&booking_id)
-    .execute(&mut *tx)
-    .await;
 
     // Mark this token as used
     let _ =
