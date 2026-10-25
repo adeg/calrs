@@ -583,9 +583,16 @@ async fn sync_ews_calendars(
         match provider.fetch_events_since(&cal_info.id, &since_iso).await {
             Ok(raw_events) => {
                 let count = upsert_provider_events(pool, &cal_id, &raw_events).await;
-                let deleted =
-                    remove_orphaned_ews_events(pool, key, &cal_id, &raw_events, &since_prefix)
-                        .await;
+                let deleted = remove_orphaned_ews_events(
+                    pool,
+                    key,
+                    provider,
+                    source_id,
+                    &cal_id,
+                    &raw_events,
+                    &since_prefix,
+                )
+                .await;
                 if deleted > 0 {
                     tracing::info!(
                         calendar_name = cal_label,
@@ -746,12 +753,15 @@ async fn upsert_provider_events(
 /// the response and must not be flagged as orphans. Pass an empty string to
 /// reconcile against every local event.
 ///
-/// `client = None` is implied: EWS sources can't be HTTP-verified against a
-/// `CaldavClient`, so we go straight to DB cancellation when an event has
-/// vanished from the server.
+/// A vanished event's booking goes through [`cancel_orphaned_booking`] like
+/// on CalDAV: scoped to this source and host, confirmed gone with `provider`
+/// first, and both sides emailed.
+#[allow(clippy::too_many_arguments)]
 async fn remove_orphaned_ews_events(
     pool: &SqlitePool,
     key: &[u8; 32],
+    provider: &dyn crate::providers::CalendarProvider,
+    source_id: &str,
     cal_id: &str,
     raw_events: &[ProviderRawEvent],
     since_prefix: &str,
@@ -793,25 +803,12 @@ async fn remove_orphaned_ews_events(
                 .bind(event_id)
                 .execute(pool)
                 .await;
-            cancel_orphaned_booking_simple(pool, key, uid).await;
+            cancel_orphaned_booking(pool, key, OrphanCheck::Provider(provider), source_id, uid)
+                .await;
             deleted += 1;
         }
     }
     deleted
-}
-
-/// Simplified booking-cancel for EWS orphan reconciliation: looks up a
-/// confirmed booking by UID and marks it cancelled. Skips the
-/// `cancel_orphaned_booking` HTTP confirm step (CalDAV-specific).
-/// It sends no CANCEL, but bumps the SEQUENCE like every cancellation, so
-/// none that a later path sends can fall behind a copy.
-async fn cancel_orphaned_booking_simple(pool: &SqlitePool, _key: &[u8; 32], uid: &str) {
-    let _ = sqlx::query(
-        "UPDATE bookings SET status = 'cancelled', ics_sequence = ics_sequence + 1 WHERE uid = ? AND status = 'confirmed'",
-    )
-    .bind(uid)
-    .execute(pool)
-    .await;
 }
 
 // --- Helper functions ---
@@ -969,7 +966,7 @@ async fn delete_events_by_href(
             // (e.g. BlueMind sync-collection emitting spurious 404 propstats) — not
             // proof the host deleted the event. Cancelling on that signal alone has
             // wrongly cancelled live bookings in production.
-            cancel_orphaned_booking(pool, key, client, source_id, uid).await;
+            cancel_orphaned_booking(pool, key, OrphanCheck::Caldav(client), source_id, uid).await;
         } else {
             tracing::warn!(
                 uid = %uid,
@@ -1051,7 +1048,7 @@ async fn remove_orphaned_events(
                 .bind(event_id)
                 .execute(pool)
                 .await;
-            cancel_orphaned_booking(pool, key, client, source_id, uid).await;
+            cancel_orphaned_booking(pool, key, OrphanCheck::Caldav(client), source_id, uid).await;
             deleted += 1;
         }
     }
@@ -1078,10 +1075,21 @@ async fn remove_orphaned_events(
 ///
 /// Tests pass `None` for `client` to skip the HTTP verification and exercise the
 /// DB-only cancellation behaviour directly.
+/// What confirms, before an orphaned booking is cancelled, that its event is
+/// really gone from the host's calendar.
+#[derive(Clone, Copy)]
+enum OrphanCheck<'a> {
+    /// CalDAV: a HEAD/PROPFIND on the event. `None` skips the check (paths
+    /// with no client at hand).
+    Caldav(Option<&'a CaldavClient>),
+    /// Any other provider (EWS): a lookup by UID in the write calendar.
+    Provider(&'a dyn crate::providers::CalendarProvider),
+}
+
 async fn cancel_orphaned_booking(
     pool: &SqlitePool,
     key: &[u8; 32],
-    client: Option<&CaldavClient>,
+    check: OrphanCheck<'_>,
     source_id: &str,
     uid: &str,
 ) {
@@ -1144,26 +1152,33 @@ async fn cancel_orphaned_booking(
     ) = booking;
     let host_language = crate::email::supported_language(host_language);
 
-    // Confirm-before-cancel: if we have a client and a stored calendar href for
-    // this booking, verify that the resource is actually 404 on the server.
-    // Any non-404 outcome (200 = still there, 5xx = server flake, network = down)
-    // means we cannot prove the host deleted the event, so we skip the cancel.
-    if let (Some(client), Some(cal_href)) = (client, caldav_calendar_href.as_deref()) {
-        match client.event_exists(cal_href, uid).await {
-            Ok(false) => {
-                // Server confirms 404 — legitimate deletion, proceed.
+    // Confirm-before-cancel: if we can check and have a stored calendar href
+    // for this booking, verify that the event is really gone on the server
+    // (404 on CalDAV, no item with this UID on EWS). Any other outcome (still
+    // there, server flake, network down) means we cannot prove the host
+    // deleted the event, so we skip the cancel.
+    if let Some(cal_href) = caldav_calendar_href.as_deref() {
+        let exists = match check {
+            OrphanCheck::Caldav(Some(client)) => Some(client.event_exists(cal_href, uid).await),
+            OrphanCheck::Caldav(None) => None,
+            OrphanCheck::Provider(provider) => Some(provider.event_exists(cal_href, uid).await),
+        };
+        match exists {
+            None => {}
+            Some(Ok(false)) => {
+                // The server confirms it is gone: legitimate deletion, proceed.
             }
-            Ok(true) => {
+            Some(Ok(true)) => {
                 tracing::warn!(
                     uid = %uid,
                     booking_id = %booking_id,
                     cal_href = %cal_href,
-                    "skipping booking cancellation: CalDAV resource is still present on the server \
+                    "skipping booking cancellation: the calendar event is still present on the server \
                      (a sync path reported it as deleted but verification disagrees)"
                 );
                 return;
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 tracing::warn!(
                     uid = %uid,
                     booking_id = %booking_id,
@@ -1194,7 +1209,7 @@ async fn cancel_orphaned_booking(
     tracing::info!(
         uid = %uid,
         booking_id = %booking_id,
-        "booking cancelled: CalDAV event deleted externally"
+        "booking cancelled: calendar event deleted externally"
     );
 
     // Send cancellation emails
@@ -1324,7 +1339,7 @@ async fn cancel_orphaned_bookings(
     .unwrap_or_default();
 
     for (uid,) in &orphans {
-        cancel_orphaned_booking(pool, key, client, source_id, uid).await;
+        cancel_orphaned_booking(pool, key, OrphanCheck::Caldav(client), source_id, uid).await;
     }
 }
 
@@ -1408,6 +1423,169 @@ mod tests {
                 .unwrap();
         assert_eq!(end_at, "20261025T110000");
         assert_eq!(timezone.as_deref(), Some("Europe/Berlin"));
+    }
+
+    /// A provider whose only job is answering `event_exists`: `Some(found)`,
+    /// or `None` for a lookup that fails.
+    struct ExistsProvider(Option<bool>);
+
+    #[async_trait::async_trait]
+    impl crate::providers::CalendarProvider for ExistsProvider {
+        async fn check_connection(&self) -> Result<bool> {
+            Ok(true)
+        }
+        async fn list_calendars(&self) -> Result<Vec<crate::providers::RemoteCalendar>> {
+            Ok(vec![])
+        }
+        async fn fetch_events(&self, _: &str) -> Result<Vec<ProviderRawEvent>> {
+            Ok(vec![])
+        }
+        async fn fetch_events_since(&self, _: &str, _: &str) -> Result<Vec<ProviderRawEvent>> {
+            Ok(vec![])
+        }
+        async fn sync_delta(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<crate::providers::DeltaResult> {
+            Ok(Default::default())
+        }
+        async fn put_event(&self, _: &str, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn delete_event(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn event_exists(&self, _: &str, _: &str) -> Result<bool> {
+            self.0
+                .ok_or_else(|| anyhow::anyhow!("EWS lookup timed out"))
+        }
+    }
+
+    /// An EWS calendar whose cached event `uid` is missing from the latest
+    /// snapshot (which still holds another event), with a confirmed booking
+    /// under that uid written to the source's write calendar. Returns
+    /// (source_id, calendar_id, booking_id).
+    async fn seed_vanished_ews_booking(pool: &SqlitePool, uid: &str) -> (String, String, String) {
+        let (source_id, et_id) = seed_fixtures(pool).await;
+        let cal_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO calendars (id, source_id, href, display_name, is_busy) VALUES (?, ?, '/calendars/host/default/', 'C', 1)")
+            .bind(&cal_id).bind(&source_id).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO events (id, calendar_id, uid, start_at, end_at) VALUES (?, ?, ?, '20300615T100000', '20300615T103000')")
+            .bind(Uuid::new_v4().to_string()).bind(&cal_id).bind(uid).execute(pool).await.unwrap();
+        let booking_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO bookings (id, event_type_id, uid, guest_name, guest_email, guest_timezone,
+                start_at, end_at, status, cancel_token, reschedule_token, caldav_calendar_href)
+             VALUES (?, ?, ?, 'Guest', 'guest@example.com', 'UTC',
+                '2030-06-15T10:00:00', '2030-06-15T10:30:00', 'confirmed', ?, ?,
+                '/calendars/host/default/')",
+        )
+        .bind(&booking_id)
+        .bind(&et_id)
+        .bind(uid)
+        .bind(Uuid::new_v4().to_string())
+        .bind(Uuid::new_v4().to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+        (source_id, cal_id, booking_id)
+    }
+
+    fn other_event_snapshot() -> Vec<ProviderRawEvent> {
+        vec![ProviderRawEvent {
+            remote_id: "AAMk-other".to_string(),
+            ical: "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:still-there\r\nDTSTART:20300616T100000Z\r\nDTEND:20300616T110000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n".to_string(),
+        }]
+    }
+
+    async fn booking_status(pool: &SqlitePool, id: &str) -> String {
+        sqlx::query_scalar("SELECT status FROM bookings WHERE id = ?")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// EWS used to cancel any confirmed booking with the vanished uid
+    /// straight in the database: no check that the event was really gone,
+    /// no scoping to the source or host, no email.
+    #[tokio::test]
+    async fn ews_sweep_cancels_only_when_exchange_confirms_the_event_is_gone() {
+        for (exists, expected) in [
+            (Some(true), "confirmed"),
+            (None, "confirmed"),
+            (Some(false), "cancelled"),
+        ] {
+            let pool = setup_test_db().await;
+            let key = [0u8; 32];
+            let (source_id, cal_id, booking_id) =
+                seed_vanished_ews_booking(&pool, "booking-uid").await;
+            let removed = remove_orphaned_ews_events(
+                &pool,
+                &key,
+                &ExistsProvider(exists),
+                &source_id,
+                &cal_id,
+                &other_event_snapshot(),
+                "",
+            )
+            .await;
+            assert_eq!(removed, 1, "the cached event leaves the cache either way");
+            assert_eq!(
+                booking_status(&pool, &booking_id).await,
+                expected,
+                "{exists:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ews_sweep_leaves_another_hosts_booking_alone() {
+        let pool = setup_test_db().await;
+        let key = [0u8; 32];
+        let (source_id, cal_id, _) = seed_vanished_ews_booking(&pool, "own-uid").await;
+
+        // Another host's booking, written to a calendar with the same href on
+        // their own server, whose invite copy sat in this host's calendar.
+        let (user, account, et) = (
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
+        );
+        sqlx::query("INSERT INTO users (id, email, name, role, auth_provider, username, enabled) VALUES (?, 'other@example.com', 'Other', 'user', 'local', 'other', 1)")
+            .bind(&user).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO accounts (id, name, email, timezone, user_id) VALUES (?, 'Other', 'other@example.com', 'UTC', ?)")
+            .bind(&account).bind(&user).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO event_types (id, account_id, slug, title, duration_min) VALUES (?, ?, 'demo', 'Demo', 30)")
+            .bind(&et).bind(&account).execute(&pool).await.unwrap();
+        let other_booking = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO bookings (id, event_type_id, uid, guest_name, guest_email, guest_timezone,
+                start_at, end_at, status, cancel_token, reschedule_token, caldav_calendar_href)
+             VALUES (?, ?, 'shared-uid', 'Guest', 'guest@example.com', 'UTC',
+                '2030-06-17T10:00:00', '2030-06-17T10:30:00', 'confirmed', 'ct2', 'rt2',
+                '/calendars/host/default/')",
+        )
+        .bind(&other_booking)
+        .bind(&et)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO events (id, calendar_id, uid, start_at, end_at) VALUES (?, ?, 'shared-uid', '20300617T100000', '20300617T103000')")
+            .bind(Uuid::new_v4().to_string()).bind(&cal_id).execute(&pool).await.unwrap();
+
+        remove_orphaned_ews_events(
+            &pool,
+            &key,
+            &ExistsProvider(Some(false)),
+            &source_id,
+            &cal_id,
+            &other_event_snapshot(),
+            "",
+        )
+        .await;
+        assert_eq!(booking_status(&pool, &other_booking).await, "confirmed");
     }
 
     /// Regression test for issue #44: a pending booking whose CalDAV event was deleted
