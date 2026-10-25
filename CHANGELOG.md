@@ -175,6 +175,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 | Custom favicon | 1.21.0 | Admin-uploaded favicon for every page, with the calrs crab as the default (#295, by @fucx) |
 | Every page in nine languages | 1.21.0 | The embed generator, host reschedule page, admin notices and Google connection errors now render through Fluent too (#260, by @Ivann136) |
 
+## [Unreleased]
+
+### Fixed
+
+- **Provider snapshot reconciliation** — an empty EWS snapshot now removes the events deleted since the last sync, and only events starting inside the fetched window are compared, as instants rather than date prefixes. One unreadable item no longer stops the rest of its calendar from syncing: the readable ones are cached and nothing is removed until a clean snapshot, and the source reports the sync as failing meanwhile so the owner is alerted. A vanished event cancels its booking only on the source's write calendar. EWS timestamps with fractional seconds (`20230207T170000.000Z`) now parse.
+
 ## [1.21.0] - 2026-10-25
 
 Every page now renders in the reader's language, and admins can upload their own favicon. No migrations, no configuration change. Behind nginx, see the note under Fixed about `client_max_body_size`.
