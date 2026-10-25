@@ -242,7 +242,7 @@ async fn list_items_window(
             // busy window outright instead of cutting it short: that window
             // is incomplete, and smaller ones may still be read.
             Err(e) if start_utc.is_some() && is_find_limit_fault(&e.to_string()) => {
-                tracing::debug!(error = %e, "EWS refused a CalendarView over its find limit");
+                tracing::info!(error = %e, "EWS refused a CalendarView over its find limit, splitting the window");
                 return Ok((Vec::new(), false));
             }
             other => other?,
