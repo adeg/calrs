@@ -397,7 +397,19 @@ impl CaldavClient {
                 .send()
                 .await?;
             let s = resp.status();
-            if s.is_success() || s.as_u16() == 207 {
+            if s.as_u16() == 207 {
+                // The outer 207 only says the server answered. Whether the
+                // event is there is the resource's own status inside the body.
+                let xml = resp.text().await?;
+                return match propfind_resource_exists(&xml) {
+                    Some(exists) => Ok(exists),
+                    None => bail!(
+                        "PROPFIND {} returned a multistatus without a usable status",
+                        url
+                    ),
+                };
+            }
+            if s.is_success() {
                 return Ok(true);
             }
             if s.as_u16() == 404 || s.as_u16() == 410 {
@@ -701,6 +713,32 @@ fn parse_sync_response(xml: &str) -> SyncResult {
         changed,
         deleted_hrefs,
     }
+}
+
+/// Read the multistatus answer to a depth:0 PROPFIND on one resource. Depth 0
+/// returns a single `<response>`, so the first one is the resource asked about.
+///
+/// - `Some(false)`: its resource-level `<status>` is 404 or 410.
+/// - `Some(true)`: its resource-level status is 2xx, or it has no
+///   resource-level status but carries `<propstat>` blocks. A propstat 404
+///   means a property is missing on a resource that exists, not that the
+///   resource is gone (the misreading `parse_sync_response` guards against).
+/// - `None`: no response, or another resource-level status; the caller can't
+///   tell and must not act on it.
+fn propfind_resource_exists(xml: &str) -> Option<bool> {
+    let block = *split_responses(xml).first()?;
+    let stripped = strip_propstat_blocks(block);
+    if let Some(status) = extract_tag(&stripped, "d:status") {
+        if status.contains("404") || status.contains("410") {
+            return Some(false);
+        }
+        let is_2xx = status
+            .split_whitespace()
+            .nth(1)
+            .is_some_and(|code| code.len() == 3 && code.starts_with('2'));
+        return is_2xx.then_some(true);
+    }
+    (stripped.len() < block.len()).then_some(true)
 }
 
 /// Remove every `<propstat>…</propstat>` subtree from a WebDAV response fragment.
@@ -1686,6 +1724,42 @@ END:VCALENDAR</cal:calendar-data>
         let out = strip_propstat_blocks(s);
         assert!(out.contains("propstats-wrapper"));
         assert!(out.contains("keep me"));
+    }
+
+    // --- propfind_resource_exists ---
+
+    #[test]
+    fn propfind_resource_level_404_means_gone() {
+        let xml = r#"<d:multistatus xmlns:d="DAV:"><d:response><d:href>/cal/x.ics</d:href>
+<d:status>HTTP/1.1 404 Not Found</d:status></d:response></d:multistatus>"#;
+        assert_eq!(propfind_resource_exists(xml), Some(false));
+        let gone = xml.replace("404 Not Found", "410 Gone");
+        assert_eq!(propfind_resource_exists(&gone), Some(false));
+    }
+
+    #[test]
+    fn propfind_propstat_means_present_even_with_a_missing_property() {
+        let found = r#"<D:multistatus xmlns:D="DAV:"><D:response><D:href>/cal/x.ics</D:href>
+<D:propstat><D:prop><D:getetag>"1"</D:getetag></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+</D:response></D:multistatus>"#;
+        assert_eq!(propfind_resource_exists(found), Some(true));
+        // getetag not returned: a property-level 404 on a resource that exists.
+        let missing_prop = r#"<multistatus xmlns="DAV:"><response><href>/cal/x.ics</href>
+<propstat><prop><getetag/></prop><status>HTTP/1.1 404 Not Found</status></propstat>
+</response></multistatus>"#;
+        assert_eq!(propfind_resource_exists(missing_prop), Some(true));
+    }
+
+    #[test]
+    fn propfind_without_a_usable_status_is_unknown() {
+        assert_eq!(propfind_resource_exists(""), None);
+        assert_eq!(propfind_resource_exists("<d:multistatus/>"), None);
+        let forbidden = r#"<d:multistatus><d:response><d:href>/cal/x.ics</d:href>
+<d:status>HTTP/1.1 403 Forbidden</d:status></d:response></d:multistatus>"#;
+        assert_eq!(propfind_resource_exists(forbidden), None);
+        let bare =
+            "<d:multistatus><d:response><d:href>/cal/x.ics</d:href></d:response></d:multistatus>";
+        assert_eq!(propfind_resource_exists(bare), None);
     }
 
     // --- parse_event_responses ---

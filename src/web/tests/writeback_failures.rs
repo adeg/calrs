@@ -64,15 +64,15 @@ async fn spawn_mock_dav(mode: DavMode) -> (String, Arc<MockDav>) {
                 dav.puts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let mode = *dav.mode.lock().unwrap();
                 match mode {
-                    DavMode::Reject => StatusCode::BAD_REQUEST,
-                    DavMode::Drop => StatusCode::CREATED,
+                    DavMode::Reject => (StatusCode::BAD_REQUEST, String::new()),
+                    DavMode::Drop => (StatusCode::CREATED, String::new()),
                     DavMode::Ok => {
                         dav.stored.lock().unwrap().insert(path, body);
-                        StatusCode::CREATED
+                        (StatusCode::CREATED, String::new())
                     }
                 }
             } else if method == Method::HEAD {
-                if dav
+                let status = if dav
                     .head_bad_request
                     .load(std::sync::atomic::Ordering::SeqCst)
                 {
@@ -81,18 +81,27 @@ async fn spawn_mock_dav(mode: DavMode) -> (String, Arc<MockDav>) {
                     StatusCode::OK
                 } else {
                     StatusCode::NOT_FOUND
-                }
+                };
+                (status, String::new())
             } else if method.as_str() == "PROPFIND" {
-                if dav.stored.lock().unwrap().contains_key(&path) {
-                    StatusCode::MULTI_STATUS
+                // Always 207, as servers do: whether the event exists is the
+                // resource's own status inside the body, not the outer one.
+                let inner = if dav.stored.lock().unwrap().contains_key(&path) {
+                    "<d:propstat><d:prop><d:getetag>\"1\"</d:getetag></d:prop>\
+                     <d:status>HTTP/1.1 200 OK</d:status></d:propstat>"
                 } else {
-                    StatusCode::NOT_FOUND
-                }
+                    "<d:status>HTTP/1.1 404 Not Found</d:status>"
+                };
+                let xml = format!(
+                    "<?xml version=\"1.0\"?><d:multistatus xmlns:d=\"DAV:\"><d:response>\
+                     <d:href>{path}</d:href>{inner}</d:response></d:multistatus>"
+                );
+                (StatusCode::MULTI_STATUS, xml)
             } else if method == Method::DELETE {
                 dav.stored.lock().unwrap().remove(&path);
-                StatusCode::NO_CONTENT
+                (StatusCode::NO_CONTENT, String::new())
             } else {
-                StatusCode::METHOD_NOT_ALLOWED
+                (StatusCode::METHOD_NOT_ALLOWED, String::new())
             }
         }
     });
@@ -231,6 +240,23 @@ async fn head_refused_with_400_is_verified_by_propfind() {
     assert_eq!(attempts, 0);
     assert_eq!(next, None);
     assert_eq!(dav.puts(), 1);
+}
+
+/// The other half: HEAD is refused with 400 and the server dropped the event.
+/// PROPFIND answers 207 with a 404 for the event itself, and that must be read
+/// as a failed write-back, not as confirmation by the outer 207.
+#[tokio::test]
+async fn propfind_207_reporting_a_missing_event_is_a_failure() {
+    let (pool, dav, host, id, uid) = writeback_fixture(DavMode::Drop).await;
+    dav.refuse_head_with_400();
+    push_fresh(&pool, &host, &uid).await;
+
+    let (error, attempts, next, _, status) = writeback_state(&pool, &id).await;
+    assert_eq!(status, "confirmed");
+    let error = error.expect("the failure must be recorded");
+    assert!(error.contains("not readable back"), "{error}");
+    assert_eq!(attempts, 1);
+    assert!(next.is_some(), "a retry is scheduled");
 }
 
 /// A retry that lands clears the failure, and retrying never duplicates the
