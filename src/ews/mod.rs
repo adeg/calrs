@@ -265,6 +265,9 @@ fn synth_raw_events(items: Vec<parse::EwsCalendarItem>) -> Vec<RawEvent> {
     out
 }
 
+/// Width of the sync's `CalendarView` window, from its start.
+pub(crate) const SYNC_WINDOW_DAYS: i64 = 730;
+
 /// The `CalendarView` window for a sync from `since_utc`: from there to
 /// roughly two years later (the horizon over which calrs ever needs
 /// free/busy data). An unparseable `since_utc` starts the window now.
@@ -276,7 +279,7 @@ fn calendar_view_window(
     let start = DateTime::parse_from_rfc3339(since_utc)
         .map(|d| d.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now());
-    (start, start + Duration::days(730))
+    (start, start + Duration::days(SYNC_WINDOW_DAYS))
 }
 
 #[cfg(test)]

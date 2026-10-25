@@ -18,7 +18,7 @@ const STALE_SECS: i64 = 300;
 /// truncates the forward window of unfiltered REPORTs, returns future events
 /// via the `time-range` filter. 90 days keeps recent history available for
 /// orphan/cancellation detection without ballooning the response.
-const FULL_FETCH_LOOKBACK_DAYS: i64 = 90;
+pub(crate) const FULL_FETCH_LOOKBACK_DAYS: i64 = 90;
 
 /// Per-source async mutexes used by `sync_if_stale` to dedupe in-flight
 /// syncs. Without this, concurrent on-demand calls (e.g. several booking
@@ -799,11 +799,19 @@ async fn remove_orphaned_ews_events(
     for (event_id, uid, recurrence_id) in &local_events {
         let rec_id = recurrence_id.clone().unwrap_or_default();
         if !seen_uids.iter().any(|(u, r)| u == uid && r == &rec_id) {
+            // Decide before dropping the cached event: EWS has no
+            // booking-level sweep, so when Exchange could not say whether the
+            // booking's event is gone, the cached row is what brings it back
+            // for another check on the next sync.
+            let outcome =
+                cancel_orphaned_booking(pool, key, OrphanCheck::Provider(provider), source_id, uid)
+                    .await;
+            if outcome == OrphanOutcome::Inconclusive {
+                continue;
+            }
             let _ = sqlx::query("DELETE FROM events WHERE id = ?")
                 .bind(event_id)
                 .execute(pool)
-                .await;
-            cancel_orphaned_booking(pool, key, OrphanCheck::Provider(provider), source_id, uid)
                 .await;
             deleted += 1;
         }
@@ -966,7 +974,8 @@ async fn delete_events_by_href(
             // (e.g. BlueMind sync-collection emitting spurious 404 propstats) — not
             // proof the host deleted the event. Cancelling on that signal alone has
             // wrongly cancelled live bookings in production.
-            cancel_orphaned_booking(pool, key, OrphanCheck::Caldav(client), source_id, uid).await;
+            let _ = cancel_orphaned_booking(pool, key, OrphanCheck::Caldav(client), source_id, uid)
+                .await;
         } else {
             tracing::warn!(
                 uid = %uid,
@@ -1048,7 +1057,8 @@ async fn remove_orphaned_events(
                 .bind(event_id)
                 .execute(pool)
                 .await;
-            cancel_orphaned_booking(pool, key, OrphanCheck::Caldav(client), source_id, uid).await;
+            let _ = cancel_orphaned_booking(pool, key, OrphanCheck::Caldav(client), source_id, uid)
+                .await;
             deleted += 1;
         }
     }
@@ -1086,13 +1096,27 @@ enum OrphanCheck<'a> {
     Provider(&'a dyn crate::providers::CalendarProvider),
 }
 
+/// What [`cancel_orphaned_booking`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrphanOutcome {
+    /// No confirmed booking of this source's host has this UID (or another
+    /// path changed it first): nothing to do.
+    NotOurs,
+    /// The booking was cancelled.
+    Cancelled,
+    /// The server says the booking's event is still there.
+    StillPresent,
+    /// The server could not say: the booking is left as it is.
+    Inconclusive,
+}
+
 async fn cancel_orphaned_booking(
     pool: &SqlitePool,
     key: &[u8; 32],
     check: OrphanCheck<'_>,
     source_id: &str,
     uid: &str,
-) {
+) -> OrphanOutcome {
     // Fetch booking details before cancelling. Scoped by source_id via the
     // caldav_sources join: the booking must have been pushed to this
     // source's write calendar. The host contact is the assigned member
@@ -1132,7 +1156,7 @@ async fn cancel_orphaned_booking(
 
     let booking = match booking {
         Some(b) => b,
-        None => return, // No confirmed booking with this UID
+        None => return OrphanOutcome::NotOurs, // No confirmed booking of ours with this UID
     };
 
     let (
@@ -1176,7 +1200,7 @@ async fn cancel_orphaned_booking(
                     "skipping booking cancellation: the calendar event is still present on the server \
                      (a sync path reported it as deleted but verification disagrees)"
                 );
-                return;
+                return OrphanOutcome::StillPresent;
             }
             Some(Err(e)) => {
                 tracing::warn!(
@@ -1187,7 +1211,7 @@ async fn cancel_orphaned_booking(
                     "skipping booking cancellation: could not verify resource state on the server \
                      (treating inconclusive verification as not-deleted to avoid false positives)"
                 );
-                return;
+                return OrphanOutcome::Inconclusive;
             }
         }
     }
@@ -1203,7 +1227,7 @@ async fn cancel_orphaned_booking(
 
     let cancelled = matches!(updated, Ok(r) if r.rows_affected() > 0);
     if !cancelled {
-        return;
+        return OrphanOutcome::NotOurs;
     }
 
     tracing::info!(
@@ -1215,7 +1239,7 @@ async fn cancel_orphaned_booking(
     // Send cancellation emails
     let smtp_config = match crate::email::load_smtp_config(pool, key).await {
         Ok(Some(cfg)) => cfg,
-        _ => return, // No SMTP configured, skip email
+        _ => return OrphanOutcome::Cancelled, // No SMTP configured, skip email
     };
 
     let utc_times = crate::booking_time::ics_times(&start_at, &end_at);
@@ -1287,6 +1311,7 @@ async fn cancel_orphaned_booking(
             "failed to send external cancellation email to host"
         );
     }
+    OrphanOutcome::Cancelled
 }
 
 /// Extract HH:MM time from a datetime string.
@@ -1339,7 +1364,8 @@ async fn cancel_orphaned_bookings(
     .unwrap_or_default();
 
     for (uid,) in &orphans {
-        cancel_orphaned_booking(pool, key, OrphanCheck::Caldav(client), source_id, uid).await;
+        let _ =
+            cancel_orphaned_booking(pool, key, OrphanCheck::Caldav(client), source_id, uid).await;
     }
 }
 
@@ -1531,12 +1557,21 @@ mod tests {
                 "",
             )
             .await;
-            assert_eq!(removed, 1, "the cached event leaves the cache either way");
             assert_eq!(
                 booking_status(&pool, &booking_id).await,
                 expected,
                 "{exists:?}"
             );
+            // When Exchange could not tell, the cached event stays, so the
+            // next sync checks again rather than leaving it confirmed for good.
+            let cached: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE uid = 'booking-uid'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let gone = exists.is_some();
+            assert_eq!(removed, u32::from(gone), "{exists:?}");
+            assert_eq!(cached, i64::from(!gone), "{exists:?}");
         }
     }
 

@@ -417,10 +417,15 @@ fn is_unsupported_restriction_fault(message: &str) -> bool {
     UNSUPPORTED_RESTRICTION_FAULTS.contains(&code)
 }
 
-/// How far back and forward the fallback scan looks. The booking horizon is
-/// capped at 365 days, so a calrs-written item lives inside this window.
-const UID_SCAN_PAST_DAYS: i64 = 30;
-const UID_SCAN_FUTURE_DAYS: i64 = 400;
+/// How far back and forward the fallback scan looks. It must cover the whole
+/// sync window (`FULL_FETCH_LOOKBACK_DAYS` back, `SYNC_WINDOW_DAYS` from
+/// there), not just the booking horizon: the orphan sweep asks it whether an
+/// event that left a snapshot is really gone, and a miss outside the scan
+/// would read as "deleted". One day of slack at each end covers the day
+/// granularity of the sweep's lower bound and the time spent syncing.
+const UID_SCAN_PAST_DAYS: i64 = crate::commands::sync::FULL_FETCH_LOOKBACK_DAYS + 1;
+const UID_SCAN_FUTURE_DAYS: i64 =
+    super::SYNC_WINDOW_DAYS - crate::commands::sync::FULL_FETCH_LOOKBACK_DAYS + 1;
 /// Width of one CalendarView request. A CalendarView returns at most 1000
 /// entries, so the window is split to keep each request well under that on a
 /// busy calendar.
@@ -923,5 +928,38 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("refusing a partial snapshot"));
+    }
+
+    #[tokio::test]
+    async fn uid_scan_covers_the_whole_sync_window() {
+        use chrono::TimeZone;
+        let now = chrono::Utc.with_ymd_and_hms(2030, 6, 15, 12, 0, 0).unwrap();
+        let start = now - chrono::Duration::days(UID_SCAN_PAST_DAYS);
+        let end = now + chrono::Duration::days(UID_SCAN_FUTURE_DAYS);
+        // The oldest and newest days a sync snapshot can hold. The former
+        // -30/+400-day scan missed both and called them deleted.
+        let lookback = crate::commands::sync::FULL_FETCH_LOOKBACK_DAYS;
+        let ahead = super::super::SYNC_WINDOW_DAYS - lookback;
+        for offset in [-lookback, ahead - 1] {
+            let items = vec![(
+                now + chrono::Duration::days(offset),
+                item("TARGET", Some("wanted@calrs")),
+            )];
+            let calls = std::cell::RefCell::new(Vec::new());
+            let found = scan_windows_for_uid(
+                start,
+                end,
+                "wanted@calrs",
+                CALENDAR_VIEW_CAP,
+                chrono::Duration::hours(UID_SCAN_MIN_WINDOW_HOURS),
+                |s, e| {
+                    let result = fake_view(items.clone(), CALENDAR_VIEW_CAP, &calls, s, e);
+                    async move { result }
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(found, ["TARGET"], "missed sync-window day {offset}");
+        }
     }
 }
