@@ -563,18 +563,27 @@ pub(super) async fn serve_logo(State(state): State<Arc<AppState>>) -> impl IntoR
         // Uploads have refused SVG since #97, but an instance set up before
         // then can still hold one. Keep serving it, sandboxed so that opening
         // `/logo` directly cannot run a script inside it.
-        None if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") => {
-            response.header("Content-Type", "image/svg+xml").header(
-                "Content-Security-Policy",
-                "default-src 'none'; style-src 'unsafe-inline'; sandbox",
-            )
-        }
+        None if looks_like_svg(&bytes) => response.header("Content-Type", "image/svg+xml").header(
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; sandbox",
+        ),
         None => response.header("Content-Type", "image/png"),
     };
     response
         .body(axum::body::Body::from(bytes))
         .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()))
         .into_response()
+}
+
+/// Whether a stored logo is an SVG, as exported files start: possibly after a
+/// byte order mark and whitespace, with an XML declaration, a doctype, a
+/// comment or the root element.
+fn looks_like_svg(bytes: &[u8]) -> bool {
+    let start = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    let start = &start[start.iter().take_while(|b| b.is_ascii_whitespace()).count()..];
+    [&b"<svg"[..], b"<?xml", b"<!DOCTYPE svg", b"<!--"]
+        .iter()
+        .any(|prefix| start.starts_with(prefix))
 }
 
 // --- Favicon management ---

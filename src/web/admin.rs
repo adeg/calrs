@@ -561,6 +561,8 @@ pub(super) async fn admin_dashboard(
             resource_notice => resource_notice,
             resource_error => resource_error,
             upload_error => upload_error,
+            logo_max_bytes => LOGO_MAX_BYTES,
+            favicon_max_bytes => FAVICON_MAX_BYTES,
         })
         .unwrap_or_else(|e| internal_error_body("template render", &e)),
     )

@@ -426,6 +426,7 @@ async fn an_svg_logo_is_refused_with_a_message() {
     )
     .await;
     assert!(page.contains(">The logo was not saved."), "message shown");
+    assert!(page.contains(&format!("data-max-bytes=\"{LOGO_MAX_BYTES}\"")));
     assert!(!page.contains("SVG"), "the help no longer recommends SVG");
 }
 
@@ -524,14 +525,21 @@ async fn the_logo_is_served_with_its_real_type() {
 #[tokio::test]
 async fn a_legacy_svg_logo_is_served_sandboxed() {
     let (app, data_dir) = router_with_data_dir().await;
-    std::fs::write(data_dir.join("logo.png"), b"<svg onload=\"alert(1)\"/>").unwrap();
-    let response = app.oneshot(get("/logo")).await.unwrap();
-    assert_eq!(response.headers()["content-type"], "image/svg+xml");
-    let csp = response.headers()["content-security-policy"]
-        .to_str()
-        .unwrap();
-    assert!(csp.contains("sandbox"), "{csp}");
-    assert!(csp.contains("default-src 'none'"), "{csp}");
+    for svg in [
+        &b"<svg onload=\"alert(1)\"/>"[..],
+        b"\xEF\xBB\xBF\n  <?xml version=\"1.0\"?><svg/>",
+        b"<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"\"><svg/>",
+        b"<!-- Generator: Inkscape --><svg/>",
+    ] {
+        std::fs::write(data_dir.join("logo.png"), svg).unwrap();
+        let response = app.clone().oneshot(get("/logo")).await.unwrap();
+        assert_eq!(response.headers()["content-type"], "image/svg+xml");
+        let csp = response.headers()["content-security-policy"]
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("sandbox"), "{csp}");
+        assert!(csp.contains("default-src 'none'"), "{csp}");
+    }
 }
 
 #[tokio::test]

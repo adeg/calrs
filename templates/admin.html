@@ -22,7 +22,7 @@
   {% endif %}
   <div style="display: flex; gap: 0.75rem; align-items: flex-start; flex-wrap: wrap;">
     <form method="post" action="/dashboard/admin/logo" enctype="multipart/form-data" style="margin: 0; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
-      <input type="file" name="logo" accept="image/png,image/jpeg,image/gif,image/webp" data-max-bytes="2097152" data-too-big="{{ t('admin-logo-refused') }}" required style="font-size: 0.85rem;">
+      <input type="file" name="logo" accept="image/png,image/jpeg,image/gif,image/webp" data-max-bytes="{{ logo_max_bytes }}" data-too-big="{{ t('admin-logo-refused') }}" required style="font-size: 0.85rem;">
       <button type="submit" class="slot-btn" style="cursor: pointer; font-weight: 600; color: var(--accent); border-color: var(--accent);">{{ t("settings-upload") }}</button>
     </form>
     {% if has_logo %}
@@ -53,7 +53,7 @@
   <div style="display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
     <img src="/favicon" alt="{{ t('admin-favicon') }}" width="32" height="32" style="object-fit: contain;">
     <form method="post" action="/dashboard/admin/favicon" enctype="multipart/form-data" style="margin: 0; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
-      <input type="file" name="favicon" accept="image/png,image/jpeg,image/gif,image/webp" data-max-bytes="524288" data-too-big="{{ t('admin-favicon-refused') }}" required style="font-size: 0.85rem;">
+      <input type="file" name="favicon" accept="image/png,image/jpeg,image/gif,image/webp" data-max-bytes="{{ favicon_max_bytes }}" data-too-big="{{ t('admin-favicon-refused') }}" required style="font-size: 0.85rem;">
       <button type="submit" class="slot-btn" style="cursor: pointer; font-weight: 600; color: var(--accent); border-color: var(--accent);">{{ t("settings-upload") }}</button>
     </form>
     {% if has_favicon %}
