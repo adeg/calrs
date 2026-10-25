@@ -88,7 +88,9 @@ pub async fn list_items(
 /// Fetch calendar items overlapping `[start, end)`. Both bounds are RFC 3339
 /// UTC strings (e.g. `2026-05-06T00:00:00Z`). EWS exposes this as a
 /// `CalendarView` query, which expands recurring series into their
-/// occurrences in the window — handy for booking slot computation.
+/// occurrences in the window — handy for booking slot computation. Also
+/// returns whether the server sent every item of the window (see
+/// [`calendar_view_complete`]).
 pub async fn list_items_in_window(
     endpoint: &str,
     username: &str,
@@ -96,8 +98,8 @@ pub async fn list_items_in_window(
     folder_id: &str,
     start_utc: &str,
     end_utc: &str,
-) -> Result<Vec<EwsCalendarItem>> {
-    let (items, _complete) = list_items_window(
+) -> Result<(Vec<EwsCalendarItem>, bool)> {
+    list_items_window(
         endpoint,
         username,
         password,
@@ -105,8 +107,7 @@ pub async fn list_items_in_window(
         Some(start_utc),
         Some(end_utc),
     )
-    .await?;
-    Ok(items)
+    .await
 }
 
 /// Every calendar item overlapping `[start, end)`, for the sync snapshot.
@@ -470,7 +471,6 @@ async fn find_items_by_uid_in_calendar_view(
         start,
         end,
         uid,
-        CALENDAR_VIEW_CAP,
         chrono::Duration::hours(UID_SCAN_MIN_WINDOW_HOURS),
         |s, e| async move {
             list_items_in_window(
@@ -489,22 +489,21 @@ async fn find_items_by_uid_in_calendar_view(
 
 /// Scan `[start, end)` in [`UID_SCAN_CHUNK_DAYS`] chunks, oldest first, and
 /// stop at the first window holding `uid`, since calrs writes each booking as
-/// a single item. A window that comes back with `cap` entries or more may have
-/// been truncated by the server, so it is split in half and both halves are
-/// scanned (oldest first) instead, recursively. A window no wider than
-/// `min_window` that is still at the cap is an error: returning an empty
-/// result there would let a caller conclude the item does not exist.
+/// a single item. A window the server reports incomplete (cut short, or at
+/// its entry cap) is split in half and both halves are scanned (oldest
+/// first) instead, recursively. A window no wider than `min_window` that is
+/// still incomplete is an error: returning an empty result there would let a
+/// caller conclude the item does not exist.
 async fn scan_windows_for_uid<F, Fut>(
     start: chrono::DateTime<chrono::Utc>,
     end: chrono::DateTime<chrono::Utc>,
     uid: &str,
-    cap: usize,
     min_window: chrono::Duration,
     mut fetch: F,
 ) -> Result<Vec<String>>
 where
     F: FnMut(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) -> Fut,
-    Fut: std::future::Future<Output = Result<Vec<EwsCalendarItem>>>,
+    Fut: std::future::Future<Output = Result<(Vec<EwsCalendarItem>, bool)>>,
 {
     // Windows still to scan, the next one on top of the stack.
     let mut chunks = Vec::new();
@@ -517,22 +516,22 @@ where
     chunks.reverse();
 
     while let Some((s, e)) = chunks.pop() {
-        let items = fetch(s, e).await?;
+        let (items, complete) = fetch(s, e).await?;
         // A match is a match even in a truncated window.
         let found = item_ids_with_uid(&items, uid);
         if !found.is_empty() {
             return Ok(found);
         }
-        if items.len() >= cap {
+        if !complete {
             if e - s <= min_window {
                 bail!(
-                    "EWS CalendarView from {s} to {e} returned {} entries, the server cap; \
-                     the UID scan cannot tell whether the item exists",
+                    "EWS CalendarView from {s} to {e} is still incomplete ({} entries, cut \
+                     short or at the server cap); the UID scan cannot tell whether the item exists",
                     items.len()
                 );
             }
             let mid = s + (e - s) / 2;
-            tracing::debug!(%s, %e, "EWS CalendarView hit its entry cap, splitting the window");
+            tracing::debug!(%s, %e, "EWS CalendarView incomplete, splitting the window");
             chunks.push((mid, e));
             chunks.push((s, mid));
         }
@@ -730,14 +729,17 @@ mod tests {
         >,
         s: chrono::DateTime<chrono::Utc>,
         e: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Vec<EwsCalendarItem>> {
+    ) -> Result<(Vec<EwsCalendarItem>, bool)> {
         calls.borrow_mut().push((s, e));
-        Ok(items
+        let inside: Vec<EwsCalendarItem> = items
             .into_iter()
             .filter(|(at, _)| *at >= s && *at < e)
             .map(|(_, i)| i)
-            .take(cap)
-            .collect())
+            .collect();
+        // Like Exchange: at most `cap` entries, and an answer at the cap is
+        // not trusted to be complete.
+        let complete = inside.len() < cap;
+        Ok((inside.into_iter().take(cap).collect(), complete))
     }
 
     #[tokio::test]
@@ -763,7 +765,6 @@ mod tests {
             start,
             end,
             "wanted@calrs",
-            10,
             chrono::Duration::days(1),
             |s, e| {
                 let r = fake_view(items.clone(), 10, &calls, s, e);
@@ -800,7 +801,6 @@ mod tests {
             start,
             end,
             "wanted@calrs",
-            10,
             chrono::Duration::days(1),
             |s, e| {
                 let r = fake_view(items.clone(), 10, &calls, s, e);
@@ -825,7 +825,6 @@ mod tests {
             start,
             end,
             "wanted@calrs",
-            10,
             chrono::Duration::days(1),
             |s, e| {
                 let r = fake_view(items.clone(), 10, &calls, s, e);
@@ -967,7 +966,6 @@ mod tests {
                 start,
                 end,
                 "wanted@calrs",
-                CALENDAR_VIEW_CAP,
                 chrono::Duration::hours(UID_SCAN_MIN_WINDOW_HOURS),
                 |s, e| {
                     let result = fake_view(items.clone(), CALENDAR_VIEW_CAP, &calls, s, e);
@@ -991,5 +989,34 @@ mod tests {
         assert!(calendar_view_complete(None, 5, None));
         // At the cap, nothing is trusted.
         assert!(!calendar_view_complete(Some(true), CALENDAR_VIEW_CAP, None));
+    }
+
+    #[tokio::test]
+    async fn uid_scan_splits_a_window_cut_short_below_the_cap() {
+        use chrono::TimeZone;
+        let start = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let target = start + chrono::Duration::days(40);
+        // A server whose own limit is far below 1000: any window wider than
+        // ten days comes back empty and flagged incomplete. Counting entries
+        // alone would read that as "not found".
+        let found = scan_windows_for_uid(
+            start,
+            start + chrono::Duration::days(60),
+            "wanted@calrs",
+            chrono::Duration::days(1),
+            |s, e| {
+                let result = if e - s > chrono::Duration::days(10) {
+                    Ok((vec![], false))
+                } else if target >= s && target < e {
+                    Ok((vec![item("TARGET", Some("wanted@calrs"))], true))
+                } else {
+                    Ok((vec![], true))
+                };
+                async move { result }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(found, ["TARGET"]);
     }
 }
