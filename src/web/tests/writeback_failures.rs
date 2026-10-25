@@ -13,17 +13,24 @@ enum DavMode {
     Reject,
 }
 
-/// A tiny CalDAV collection on loopback: PUT, HEAD and DELETE by path. Keeps
-/// each stored event's body so a test can read what the calendar got.
+/// A tiny CalDAV collection on loopback: PUT, HEAD, PROPFIND and DELETE by
+/// path. Keeps each stored event's body so a test can read what the calendar
+/// got.
 struct MockDav {
     mode: std::sync::Mutex<DavMode>,
     stored: std::sync::Mutex<std::collections::HashMap<String, String>>,
     puts: std::sync::atomic::AtomicUsize,
+    /// Answer every HEAD with 400, as iCloud does.
+    head_bad_request: std::sync::atomic::AtomicBool,
 }
 
 impl MockDav {
     fn set_mode(&self, mode: DavMode) {
         *self.mode.lock().unwrap() = mode;
+    }
+    fn refuse_head_with_400(&self) {
+        self.head_bad_request
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
     fn puts(&self) -> usize {
         self.puts.load(std::sync::atomic::Ordering::SeqCst)
@@ -46,6 +53,7 @@ async fn spawn_mock_dav(mode: DavMode) -> (String, Arc<MockDav>) {
         mode: std::sync::Mutex::new(mode),
         stored: std::sync::Mutex::new(std::collections::HashMap::new()),
         puts: std::sync::atomic::AtomicUsize::new(0),
+        head_bad_request: std::sync::atomic::AtomicBool::new(false),
     });
     let state = dav.clone();
     let app = Router::new().fallback(move |method: Method, uri: Uri, body: String| {
@@ -64,8 +72,19 @@ async fn spawn_mock_dav(mode: DavMode) -> (String, Arc<MockDav>) {
                     }
                 }
             } else if method == Method::HEAD {
-                if dav.stored.lock().unwrap().contains_key(&path) {
+                if dav
+                    .head_bad_request
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    StatusCode::BAD_REQUEST
+                } else if dav.stored.lock().unwrap().contains_key(&path) {
                     StatusCode::OK
+                } else {
+                    StatusCode::NOT_FOUND
+                }
+            } else if method.as_str() == "PROPFIND" {
+                if dav.stored.lock().unwrap().contains_key(&path) {
+                    StatusCode::MULTI_STATUS
                 } else {
                     StatusCode::NOT_FOUND
                 }
@@ -196,6 +215,22 @@ async fn verified_writeback_records_nothing() {
     assert_eq!(next, None);
     assert_eq!(href.as_deref(), Some("/dav/cal/"));
     assert_eq!(dav.stored(), 1);
+}
+
+/// iCloud stores the event but answers the verifying HEAD with 400. The
+/// check falls back to PROPFIND, as for 405 and 501, instead of recording a
+/// failure and rewriting the event eight times.
+#[tokio::test]
+async fn head_refused_with_400_is_verified_by_propfind() {
+    let (pool, dav, host, id, uid) = writeback_fixture(DavMode::Ok).await;
+    dav.refuse_head_with_400();
+    push_fresh(&pool, &host, &uid).await;
+
+    let (error, attempts, next, _, _) = writeback_state(&pool, &id).await;
+    assert_eq!(error, None);
+    assert_eq!(attempts, 0);
+    assert_eq!(next, None);
+    assert_eq!(dav.puts(), 1);
 }
 
 /// A retry that lands clears the failure, and retrying never duplicates the
