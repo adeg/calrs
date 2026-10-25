@@ -172,6 +172,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 | `ARCHITECTURE.md` | 1.19.0 | Map of the code for contributors after `src/web` and `src/email` were split into feature modules |
 | Every timezone in every picker | 1.20.0 | All IANA zones grouped by region, with the common ones first, and a slot-page note when the clocks change before the day shown (#265) |
 | Attendees follow the booking | 1.20.0 | Additional attendees get updates when a reschedule is confirmed and cancellations when a booking ends; invites carry a SEQUENCE and fold long lines (#267) |
+| Custom favicon | 1.21.0 | Admin-uploaded favicon for every page, with the calrs crab as the default (#295, by @fucx) |
+| Every page in nine languages | 1.21.0 | The embed generator, host reschedule page, admin notices and Google connection errors now render through Fluent too (#260, by @Ivann136) |
+
+## [1.21.0] - 2026-10-25
+
+Every page now renders in the reader's language, and admins can upload their own favicon. No migrations, no configuration change. Behind nginx, see the note under Fixed about `client_max_body_size`.
+
+### Added
+
+- **Custom favicon** (#295) - Admins can upload a favicon in the admin panel (PNG, JPEG, GIF or WebP, up to 512 KB). It is served at `/favicon` and `/favicon.ico` for every page; without one, the calrs crab is shown as before. Thanks @fucx.
+
+### Changed
+
+- **The last English strings now go through Fluent** (#260) - The embed snippet generator, the host reschedule page, the impersonation banner, admin panel notices (shared resources, SMTP and SMS settings, SMS tests, base URL and company link), the Google Calendar connection errors and a few form titles and hints were still English whatever the user's language. 82 keys were added in all nine locales. Thanks @Ivann136, who also reworded the Dutch impersonation strings.
+
+### Fixed
+
+- **Refused logo and favicon uploads now say why** (#304, #306) - The logo help recommended SVG, which calrs refuses on purpose, and a refused upload redirected back with no message. The help now lists the accepted formats, a refused upload shows them under its card, an oversized file is refused in the browser before uploading, and a logo just under the advertised 2 MB is no longer refused by the request size limit. `/logo` is served with its real type, and an SVG logo stored before uploads refused SVG keeps displaying but is sandboxed when opened directly. Reported by @fucx.
+- **nginx example** - The deployment docs and README now set `client_max_body_size 3m`. nginx's default of 1 MB answered 413 to any logo or avatar over 1 MB; existing nginx setups need the same line.
+- `/favicon.ico` is kept out of the embed mode's routes, like `/favicon` (#303).
 
 ## [1.20.7] - 2026-10-25
 
