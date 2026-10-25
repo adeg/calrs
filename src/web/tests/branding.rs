@@ -341,3 +341,270 @@ async fn logo_returns_response() {
     let status = response.status().as_u16();
     assert!(status == 200 || status == 404 || status == 303);
 }
+
+// --- Logo and favicon uploads (#304) ---
+
+/// A router with a data directory, and the session of an admin of it.
+async fn admin_with_data_dir() -> (Router, std::path::PathBuf, String) {
+    let pool = setup_test_db().await;
+    let (user_id, session) =
+        insert_test_user_with_session(&pool, "Admin", "admin@example.com", "admin").await;
+    sqlx::query("UPDATE users SET role = 'admin' WHERE id = ?")
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let data_dir = std::env::temp_dir().join(format!("calrs_test_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let router = create_router(pool, data_dir.clone(), [0u8; 32]).await;
+    (router, data_dir, session)
+}
+
+/// The multipart POST the admin page's upload form sends.
+fn upload(
+    uri: &str,
+    session: &str,
+    field: &str,
+    content_type: &str,
+    bytes: &[u8],
+) -> axum::http::Request<Body> {
+    let boundary = "calrs-test-boundary";
+    let mut body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"upload\"\r\nContent-Type: {content_type}\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("{uri}?_csrf=tok"))
+        .header(
+            "cookie",
+            format!("__Host-calrs_session={session}; __Host-calrs_csrf=tok"),
+        )
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap()
+}
+
+/// A PNG signature padded to `len` bytes, which is all the upload checks read.
+fn png_of(len: usize) -> Vec<u8> {
+    let mut bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.resize(len, 0);
+    bytes
+}
+
+fn location(response: &axum::http::Response<Body>) -> &str {
+    response.headers()["location"].to_str().unwrap()
+}
+
+#[tokio::test]
+async fn an_svg_logo_is_refused_with_a_message() {
+    let (app, data_dir, session) = admin_with_data_dir().await;
+    let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\" onload=\"alert(1)\"/>";
+    let response = app
+        .clone()
+        .oneshot(upload(
+            "/dashboard/admin/logo",
+            &session,
+            "logo",
+            "image/svg+xml",
+            svg,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(location(&response), "/dashboard/admin?upload_error=logo");
+    assert!(!data_dir.join("logo.png").exists());
+
+    let page = body_string(
+        app.oneshot(get_authed("/dashboard/admin?upload_error=logo", &session))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(page.contains(">The logo was not saved."), "message shown");
+    assert!(page.contains(&format!("data-max-bytes=\"{LOGO_MAX_BYTES}\"")));
+    assert!(!page.contains("SVG"), "the help no longer recommends SVG");
+}
+
+#[tokio::test]
+async fn a_logo_up_to_the_advertised_2_mb_is_saved() {
+    let (app, data_dir, session) = admin_with_data_dir().await;
+    let png = png_of(LOGO_MAX_BYTES);
+    let response = app
+        .clone()
+        .oneshot(upload(
+            "/dashboard/admin/logo",
+            &session,
+            "logo",
+            "image/png",
+            &png,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(location(&response), "/dashboard/admin");
+    assert_eq!(std::fs::read(data_dir.join("logo.png")).unwrap(), png);
+
+    let response = app
+        .oneshot(upload(
+            "/dashboard/admin/logo",
+            &session,
+            "logo",
+            "image/png",
+            &png_of(LOGO_MAX_BYTES + 1),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(location(&response), "/dashboard/admin?upload_error=logo");
+}
+
+/// Over the route's body limit, the multipart reader itself fails; that must
+/// still say why rather than redirect with nothing.
+#[tokio::test]
+async fn a_logo_over_the_body_limit_is_refused_with_a_message() {
+    let (app, data_dir, session) = admin_with_data_dir().await;
+    let png = png_of(LOGO_MAX_BYTES + 256 * 1024);
+    let response = app
+        .oneshot(upload(
+            "/dashboard/admin/logo",
+            &session,
+            "logo",
+            "image/png",
+            &png,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(location(&response), "/dashboard/admin?upload_error=logo");
+    assert!(!data_dir.join("logo.png").exists());
+}
+
+/// A body cut off before its closing boundary fails in the reader, not in the
+/// size or format checks (the image itself is valid), so only the handling
+/// of a read error can refuse it.
+#[tokio::test]
+async fn a_truncated_upload_is_refused_with_a_message() {
+    let (app, data_dir, session) = admin_with_data_dir().await;
+    for (uri, field, file) in [
+        ("/dashboard/admin/logo", "logo", "logo.png"),
+        ("/dashboard/admin/favicon", "favicon", FAVICON_FILE),
+    ] {
+        let request = upload(uri, &session, field, "image/png", &png_of(1024));
+        let (parts, body) = request.into_parts();
+        let bytes = body.collect().await.unwrap().to_bytes();
+        let cut = bytes.len() - "\r\n--calrs-test-boundary--\r\n".len();
+        let request = axum::http::Request::from_parts(parts, Body::from(bytes.slice(..cut)));
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            location(&response),
+            format!("/dashboard/admin?upload_error={field}")
+        );
+        assert!(!data_dir.join(file).exists(), "{field}");
+    }
+}
+
+#[tokio::test]
+async fn the_logo_is_served_with_its_real_type() {
+    let (app, data_dir) = router_with_data_dir().await;
+    for (bytes, content_type) in [
+        (b"GIF89a....".to_vec(), "image/gif"),
+        (b"RIFF\0\0\0\0WEBPVP8 ".to_vec(), "image/webp"),
+        (vec![0xFF, 0xD8, 0xFF, 0xE0], "image/jpeg"),
+        (png_of(16), "image/png"),
+    ] {
+        std::fs::write(data_dir.join("logo.png"), &bytes).unwrap();
+        let response = app.clone().oneshot(get("/logo")).await.unwrap();
+        assert_eq!(response.headers()["content-type"], content_type);
+    }
+}
+
+/// An SVG logo stored before uploads refused SVG keeps displaying, but cannot
+/// run its script when `/logo` is opened directly.
+#[tokio::test]
+async fn a_legacy_svg_logo_is_served_sandboxed() {
+    let (app, data_dir) = router_with_data_dir().await;
+    for svg in [
+        &b"<svg onload=\"alert(1)\"/>"[..],
+        b"\xEF\xBB\xBF\n  <?xml version=\"1.0\"?><svg/>",
+        b"<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"\"><svg/>",
+        b"<!-- Generator: Inkscape --><svg/>",
+    ] {
+        std::fs::write(data_dir.join("logo.png"), svg).unwrap();
+        let response = app.clone().oneshot(get("/logo")).await.unwrap();
+        assert_eq!(response.headers()["content-type"], "image/svg+xml");
+        let csp = response.headers()["content-security-policy"]
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("sandbox"), "{csp}");
+        assert!(csp.contains("default-src 'none'"), "{csp}");
+    }
+}
+
+#[tokio::test]
+async fn favicon_uploads_say_why_they_are_refused() {
+    let (app, data_dir, session) = admin_with_data_dir().await;
+    for bytes in [png_of(FAVICON_MAX_BYTES + 1), b"GIF8 not quite".to_vec()] {
+        let response = app
+            .clone()
+            .oneshot(upload(
+                "/dashboard/admin/favicon",
+                &session,
+                "favicon",
+                "image/png",
+                &bytes,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(location(&response), "/dashboard/admin?upload_error=favicon");
+    }
+    assert!(!data_dir.join(FAVICON_FILE).exists());
+
+    let page = body_string(
+        app.clone()
+            .oneshot(get_authed(
+                "/dashboard/admin?upload_error=favicon",
+                &session,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(page.contains(">The favicon was not saved."));
+
+    let png = png_of(FAVICON_MAX_BYTES);
+    let response = app
+        .oneshot(upload(
+            "/dashboard/admin/favicon",
+            &session,
+            "favicon",
+            "image/png",
+            &png,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(location(&response), "/dashboard/admin");
+    assert_eq!(std::fs::read(data_dir.join(FAVICON_FILE)).unwrap(), png);
+}
+
+/// The page reads back fixed reasons only, so a crafted link shows nothing.
+#[tokio::test]
+async fn an_unknown_upload_error_shows_no_message() {
+    let (app, _, session) = admin_with_data_dir().await;
+    let page = body_string(
+        app.oneshot(get_authed(
+            "/dashboard/admin?upload_error=%3Cb%3Eforged%3C%2Fb%3E",
+            &session,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert!(!page.contains("forged"));
+    // The messages also sit in the file inputs' `data-too-big`, for the
+    // browser-side check; only a paragraph of their own is shown.
+    assert!(!page.contains(">The logo was not saved."));
+    assert!(!page.contains(">The favicon was not saved."));
+    assert!(!page.contains(">The file could not be written"));
+}

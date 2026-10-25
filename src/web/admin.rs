@@ -29,6 +29,11 @@ pub(super) async fn admin_dashboard(
     let error_message = query.get("error").cloned().unwrap_or_default();
     let resource_notice = query.get("resource_notice").cloned().unwrap_or_default();
     let resource_error = query.get("resource_error").cloned().unwrap_or_default();
+    let upload_error = query
+        .get("upload_error")
+        .map(String::as_str)
+        .filter(|reason| matches!(*reason, "logo" | "logo-save" | "favicon" | "favicon-save"))
+        .unwrap_or_default();
 
     // Shared bookable resources
     let resource_rows: Vec<(
@@ -555,6 +560,9 @@ pub(super) async fn admin_dashboard(
             resource_teams_all => resource_teams_ctx,
             resource_notice => resource_notice,
             resource_error => resource_error,
+            upload_error => upload_error,
+            logo_max_bytes => LOGO_MAX_BYTES,
+            favicon_max_bytes => FAVICON_MAX_BYTES,
         })
         .unwrap_or_else(|e| internal_error_body("template render", &e)),
     )
@@ -2281,9 +2289,16 @@ pub(super) async fn admin_update_meeting_webhook(
     Redirect::to("/dashboard/admin").into_response()
 }
 
+/// Back to the admin page with the reason an upload was refused, shown under
+/// the card it came from. `admin_dashboard` only reads back these fixed
+/// values, never free text, so a crafted link cannot put words on the page.
+fn admin_upload_refused(reason: &str) -> Response {
+    Redirect::to(&format!("/dashboard/admin?upload_error={reason}")).into_response()
+}
+
 pub(super) async fn admin_upload_logo(
     State(state): State<Arc<AppState>>,
-    _admin: crate::auth::AdminUser,
+    admin: crate::auth::AdminUser,
     headers: HeaderMap,
     Query(csrf_query): Query<CsrfQuery>,
     mut multipart: Multipart,
@@ -2291,26 +2306,29 @@ pub(super) async fn admin_upload_logo(
     if let Err(resp) = verify_csrf_token(&headers, &csrf_query._csrf) {
         return resp;
     }
+    // A body over the size limit makes the multipart reader fail, which ends
+    // this loop and lands on the refusal below like any other bad upload.
     while let Ok(Some(field)) = multipart.next_field().await {
-        if field.name() == Some("logo") {
-            let content_type = field.content_type().unwrap_or("").to_string();
-            if !content_type.starts_with("image/") {
-                return Redirect::to("/dashboard/admin").into_response();
-            }
-            if let Ok(bytes) = field.bytes().await {
-                if bytes.len() > 2 * 1024 * 1024 {
-                    return Redirect::to("/dashboard/admin").into_response();
-                }
-                // Trust magic bytes, not the multipart Content-Type header.
-                if detect_image_ext(&bytes).is_none() {
-                    return Redirect::to("/dashboard/admin").into_response();
-                }
-                let logo_path = state.data_dir.join("logo.png");
-                let _ = tokio::fs::write(&logo_path, &bytes).await;
-            }
+        if field.name() != Some("logo") {
+            continue;
         }
+        let Ok(bytes) = field.bytes().await else {
+            return admin_upload_refused("logo");
+        };
+        // Trust magic bytes, not the multipart Content-Type header. SVG is
+        // not accepted, so an upload served from this origin can never carry
+        // script.
+        if bytes.len() > LOGO_MAX_BYTES || detect_image_ext(&bytes).is_none() {
+            return admin_upload_refused("logo");
+        }
+        if let Err(e) = tokio::fs::write(state.data_dir.join("logo.png"), &bytes).await {
+            tracing::error!(error = %e, "failed to save the logo");
+            return admin_upload_refused("logo-save");
+        }
+        tracing::info!(admin = %admin.user.email, "admin: logo uploaded");
+        return Redirect::to("/dashboard/admin").into_response();
     }
-    Redirect::to("/dashboard/admin").into_response()
+    admin_upload_refused("logo")
 }
 
 pub(super) async fn admin_delete_logo(
@@ -2329,7 +2347,7 @@ pub(super) async fn admin_delete_logo(
 
 pub(super) async fn admin_upload_favicon(
     State(state): State<Arc<AppState>>,
-    _admin: crate::auth::AdminUser,
+    admin: crate::auth::AdminUser,
     headers: HeaderMap,
     Query(csrf_query): Query<CsrfQuery>,
     mut multipart: Multipart,
@@ -2338,23 +2356,25 @@ pub(super) async fn admin_upload_favicon(
         return resp;
     }
     while let Ok(Some(field)) = multipart.next_field().await {
-        if field.name() == Some("favicon") {
-            if let Ok(bytes) = field.bytes().await {
-                if bytes.len() > 512 * 1024 {
-                    return Redirect::to("/dashboard/admin").into_response();
-                }
-                // Same rule as the logo: trust magic bytes, not the multipart
-                // Content-Type. SVG is not accepted, so an upload served from
-                // this origin can never carry script.
-                if detect_image_ext(&bytes).is_none() {
-                    return Redirect::to("/dashboard/admin").into_response();
-                }
-                let _ = tokio::fs::write(state.data_dir.join(FAVICON_FILE), &bytes).await;
-                tracing::info!(admin = %_admin.user.email, "admin: favicon uploaded");
-            }
+        if field.name() != Some("favicon") {
+            continue;
         }
+        let Ok(bytes) = field.bytes().await else {
+            return admin_upload_refused("favicon");
+        };
+        // Same rule as the logo: trust magic bytes, not the multipart
+        // Content-Type, and no SVG.
+        if bytes.len() > FAVICON_MAX_BYTES || detect_image_ext(&bytes).is_none() {
+            return admin_upload_refused("favicon");
+        }
+        if let Err(e) = tokio::fs::write(state.data_dir.join(FAVICON_FILE), &bytes).await {
+            tracing::error!(error = %e, "failed to save the favicon");
+            return admin_upload_refused("favicon-save");
+        }
+        tracing::info!(admin = %admin.user.email, "admin: favicon uploaded");
+        return Redirect::to("/dashboard/admin").into_response();
     }
-    Redirect::to("/dashboard/admin").into_response()
+    admin_upload_refused("favicon")
 }
 
 pub(super) async fn admin_delete_favicon(

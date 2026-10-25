@@ -551,33 +551,39 @@ pub(super) async fn get_custom_colors(
 // --- Logo management ---
 
 pub(super) async fn serve_logo(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let logo_path = state.data_dir.join("logo.png");
-    match tokio::fs::read(&logo_path).await {
-        Ok(bytes) => {
-            let content_type = if logo_path.exists() {
-                // Detect from magic bytes
-                if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-                    "image/png"
-                } else if bytes.starts_with(&[0xFF, 0xD8]) {
-                    "image/jpeg"
-                } else if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
-                    "image/svg+xml"
-                } else {
-                    "image/png"
-                }
-            } else {
-                "image/png"
-            };
-            axum::response::Response::builder()
-                .status(200)
-                .header("Content-Type", content_type)
-                .header("Cache-Control", "public, max-age=3600")
-                .body(axum::body::Body::from(bytes))
-                .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()))
-                .into_response()
-        }
-        Err(_) => (axum::http::StatusCode::NOT_FOUND, "").into_response(),
-    }
+    let Ok(bytes) = tokio::fs::read(state.data_dir.join("logo.png")).await else {
+        return (axum::http::StatusCode::NOT_FOUND, "").into_response();
+    };
+    let mut response = axum::response::Response::builder()
+        .status(200)
+        .header("Cache-Control", "public, max-age=3600");
+    response = match detect_image_ext(&bytes) {
+        Some("jpg") => response.header("Content-Type", "image/jpeg"),
+        Some(ext) => response.header("Content-Type", format!("image/{ext}")),
+        // Uploads have refused SVG since #97, but an instance set up before
+        // then can still hold one. Keep serving it, sandboxed so that opening
+        // `/logo` directly cannot run a script inside it.
+        None if looks_like_svg(&bytes) => response.header("Content-Type", "image/svg+xml").header(
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; sandbox",
+        ),
+        None => response.header("Content-Type", "image/png"),
+    };
+    response
+        .body(axum::body::Body::from(bytes))
+        .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()))
+        .into_response()
+}
+
+/// Whether a stored logo is an SVG, as exported files start: possibly after a
+/// byte order mark and whitespace, with an XML declaration, a doctype, a
+/// comment or the root element.
+fn looks_like_svg(bytes: &[u8]) -> bool {
+    let start = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    let start = &start[start.iter().take_while(|b| b.is_ascii_whitespace()).count()..];
+    [&b"<svg"[..], b"<?xml", b"<!DOCTYPE svg", b"<!--"]
+        .iter()
+        .any(|prefix| start.starts_with(prefix))
 }
 
 // --- Favicon management ---
@@ -585,6 +591,12 @@ pub(super) async fn serve_logo(State(state): State<Arc<AppState>>) -> impl IntoR
 /// File the admin-uploaded favicon is stored under, next to `logo.png`. The
 /// name is fixed whatever the format; `serve_favicon` sniffs the bytes.
 pub(super) const FAVICON_FILE: &str = "favicon.png";
+
+/// Largest logo the admin panel accepts, as its help text says.
+pub(super) const LOGO_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// Largest favicon the admin panel accepts, as its help text says.
+pub(super) const FAVICON_MAX_BYTES: usize = 512 * 1024;
 
 /// The built-in favicon, served when no custom one is uploaded. It is the crab
 /// `base.html` used to inline as a data URI.

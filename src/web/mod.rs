@@ -19,7 +19,7 @@ mod teams;
 pub(crate) mod writeback;
 
 use crate::utils::{convert_event_to_tz, parse_ical_datetime};
-use axum::extract::{Form, Multipart, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Form, Multipart, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Redirect;
 use axum::response::{Html, IntoResponse, Response};
@@ -788,7 +788,13 @@ pub async fn create_router(pool: SqlitePool, data_dir: PathBuf, secret_key: [u8;
             "/dashboard/admin/meeting-webhook",
             post(admin_update_meeting_webhook),
         )
-        .route("/dashboard/admin/logo", post(admin_upload_logo))
+        // Axum caps request bodies at 2 MB by default, which would refuse a
+        // logo just under the 2 MB it accepts once the multipart framing is
+        // added. Leave room for that framing on this route only.
+        .route(
+            "/dashboard/admin/logo",
+            post(admin_upload_logo).layer(DefaultBodyLimit::max(LOGO_MAX_BYTES + 64 * 1024)),
+        )
         .route("/dashboard/admin/logo/delete", post(admin_delete_logo))
         .route("/dashboard/admin/favicon", post(admin_upload_favicon))
         .route(
