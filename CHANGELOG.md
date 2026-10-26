@@ -184,6 +184,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- **A calendar the provider no longer lists is removed** (EWS, Microsoft) — a deleted calendar, or one whose share was removed, used to stay in the cache and its events kept blocking slots. The next sync now drops it with its events.
 - **Provider snapshot reconciliation** — an empty EWS snapshot now removes the events deleted since the last sync, and only events starting inside the fetched window are compared, as instants rather than date prefixes. One unreadable item no longer stops the rest of its calendar from syncing: the readable ones are cached and nothing is removed until a clean snapshot, and the source reports the sync as failing meanwhile so the owner is alerted. A vanished event cancels its booking only on the source's write calendar. EWS timestamps with fractional seconds (`20230207T170000.000Z`) now parse.
 
 ## [1.21.0] - 2026-10-25
